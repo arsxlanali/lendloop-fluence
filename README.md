@@ -1,4 +1,5 @@
-https://github.com/user-attachments/assets/4e6a2448-1be4-4c90-a87c-f9fe8ff2174f
+<img width="800" height="450" alt="preview" src="https://github.com/user-attachments/assets/5e14b7bd-f5f2-4ee4-bd9a-43cc42c254a6" />
+
 
 # LendLoop
 
