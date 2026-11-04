@@ -5,6 +5,8 @@ import type { FunctionReturnType } from "convex/server";
 import type { api } from "../convex/_generated/api";
 import { formatDay } from "./format";
 import { Menu, Pill } from "./ui";
+import { AvailabilityStrip, CategoryChip } from "./bits";
+import { useToday } from "./hooks";
 
 export type ToolView = FunctionReturnType<typeof api.tools.browse>["page"][number];
 type Listing = FunctionReturnType<typeof api.tools.myListings>[number];
@@ -32,23 +34,35 @@ export function ToolCard({
   onTrust: () => void;
 }) {
   const titleId = useId();
+  const today = useToday();
   const requested = "requested" in tool && tool.requested;
   const pendingRequests = "pendingRequests" in tool ? tool.pendingRequests : 0;
   return (
     <li className="card tool" aria-labelledby={titleId}>
       <div className="card-top">
-        <span className="eyebrow">{tool.category}</span>
+        <CategoryChip category={tool.category} />
         <Availability tool={tool} />
+        {admin && !tool.mine && (
+          <Menu label="Moderate" describedBy={titleId} down>
+            <button type="button" onClick={onTrust}>
+              {tool.trusted ? "Remove Trusted Lender" : "Mark as Trusted Lender"}
+            </button>
+            <button type="button" className="danger-text" onClick={onRemove}>
+              Remove listing…
+            </button>
+          </Menu>
+        )}
       </div>
       {/* Cards sit directly under the page's h1, so their titles are h2 (styled like h3). */}
       <h2 id={titleId} className="card-title">
         {tool.name}
       </h2>
       {tool.description && <p className="clamp">{tool.description}</p>}
+      <AvailabilityStrip today={today} booked={tool.soon} overdue={tool.overdue} />
       <ul className="meta">
-        <li>Condition: {tool.condition}</li>
+        <li>{tool.condition}</li>
         {tool.mine && <li className="tag">Your listing</li>}
-        {tool.trusted && !tool.mine && <li className="tag trusted">✓ Trusted lender</li>}
+        {tool.trusted && !tool.mine && <li className="tag trusted">Trusted lender</li>}
       </ul>
       {pendingRequests > 0 && (
         <Link className="notice" href="/board/incoming">
@@ -78,15 +92,13 @@ export function ToolCard({
             Choose dates
           </button>
         )}
-        {admin && !tool.mine && (
-          <Menu label="Moderate">
-            <button type="button" onClick={onTrust}>
-              {tool.trusted ? "Remove Trusted Lender" : "Mark as Trusted Lender"}
-            </button>
-            <button type="button" className="danger-text" onClick={onRemove}>
-              Remove listing…
-            </button>
-          </Menu>
+        {!tool.mine && (
+          <Link className="button secondary" href={`/board/messages?tool=${tool._id}`} aria-describedby={titleId}>
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+              <path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" />
+            </svg>
+            Ask the owner
+          </Link>
         )}
       </div>
     </li>

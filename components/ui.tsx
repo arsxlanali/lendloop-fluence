@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useId, useRef, useState } from "react";
+import { Component, useEffect, useId, useRef, useState } from "react";
 import { useRunner } from "./hooks";
 import type { Tone } from "./format";
 
@@ -106,9 +106,19 @@ export function ConfirmDialog({
   );
 }
 
-// A small disclosure menu for secondary actions (admin moderation). Plain buttons inside, so
-// Tab moves through them; Escape or a click outside closes it.
-export function Menu({ label, children }: { label: string; children: React.ReactNode }) {
+// A small disclosure menu for secondary actions (admin moderation, blocking), behind a "⋯" button
+// named by `label`. Plain buttons inside, so Tab moves through them; Escape or a click outside closes it.
+export function Menu({
+  label,
+  children,
+  down = false,
+  describedBy,
+}: {
+  label: string;
+  children: React.ReactNode;
+  down?: boolean;
+  describedBy?: string;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -131,15 +141,21 @@ export function Menu({ label, children }: { label: string; children: React.React
     };
   }, [open]);
   return (
-    <div className="menu" ref={ref}>
+    <div className={down ? "menu down" : "menu"} ref={ref}>
       <button
         type="button"
-        className="text-button"
+        className="icon-button menu-trigger"
+        aria-label={label}
+        aria-describedby={describedBy}
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen((o) => !o)}
       >
-        {label} <span aria-hidden="true">▾</span>
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <circle cx="3.5" cy="8" r="1.4" />
+          <circle cx="8" cy="8" r="1.4" />
+          <circle cx="12.5" cy="8" r="1.4" />
+        </svg>
       </button>
       <div id={id} className="menu-list" hidden={!open} onClick={() => setOpen(false)}>
         {children}
@@ -170,4 +186,20 @@ export function PageTitle({ title, children }: { title: string; children?: React
       {children}
     </div>
   );
+}
+
+// Shows a readable message instead of a broken page when a query fails (a conversation you
+// can't open, a link to something removed). Only ConvexError text is shown to users.
+export class ErrorBoundary extends Component<
+  { fallback: (message: string) => React.ReactNode; children: React.ReactNode },
+  { message: string | null }
+> {
+  state = { message: null as string | null };
+  static getDerivedStateFromError(error: unknown) {
+    const data = (error as { data?: unknown })?.data;
+    return { message: typeof data === "string" ? data : "This couldn't be loaded." };
+  }
+  render() {
+    return this.state.message ? this.props.fallback(this.state.message) : this.props.children;
+  }
 }

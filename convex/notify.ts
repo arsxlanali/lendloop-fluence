@@ -7,7 +7,7 @@ import {
 } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { requireAdmin, requireThat } from "./access";
+import { requireAdmin } from "./access";
 import { audit, FALLBACK_NAME, logActivity, profile } from "./model";
 import { tokenForN8n } from "../lib/signing";
 
@@ -136,7 +136,8 @@ export const recover = internalMutation({
   },
 });
 
-// Admin view of everything automation could not do.
+// Admin view of everything automation could not do, grouped: the same failure repeated is
+// one row with a count, newest first.
 export const failures = query({
   args: {},
   handler: async (ctx) => {
@@ -144,37 +145,74 @@ export const failures = query({
     const events = await ctx.db
       .query("events")
       .withIndex("state", (q) => q.eq("state", "failed"))
+      .take(200);
+    const runs = await ctx.db
+      .query("automationFailures")
+      .withIndex("open", (q) => q.eq("resolvedAt", undefined))
       .order("desc")
-      .take(20);
-    const runs = await ctx.db.query("automationFailures").order("desc").take(20);
+      .take(200);
+    const group = <T, K extends string>(rows: T[], key: (r: T) => K, at: (r: T) => number) => {
+      const map = new Map<K, { first: T; count: number; latestAt: number }>();
+      for (const r of rows) {
+        const g = map.get(key(r));
+        if (g) {
+          g.count++;
+          g.latestAt = Math.max(g.latestAt, at(r));
+        } else map.set(key(r), { first: r, count: 1, latestAt: at(r) });
+      }
+      return [...map.values()].sort((a, b) => b.latestAt - a.latestAt);
+    };
     return {
-      deliveries: events.map((e) => ({
-        _id: e._id,
-        kind: e.kind,
-        attempts: e.attempts,
-        error: e.error ?? "",
-        at: e._creationTime,
+      deliveries: group(events, (e) => `${e.kind}|${e.error ?? ""}` as string, (e) => e._creationTime).map((g) => ({
+        kind: g.first.kind,
+        error: g.first.error ?? "",
+        count: g.count,
+        latestAt: g.latestAt,
       })),
-      runs: runs.map((r) => ({
-        _id: r._id,
-        workflow: r.workflow,
-        node: r.node,
-        message: r.message,
-        at: r.at,
+      runs: group(runs, (r) => `${r.workflow}|${r.node}|${r.message}` as string, (r) => r.at).map((g) => ({
+        workflow: g.first.workflow,
+        node: g.first.node,
+        message: g.first.message,
+        count: g.count,
+        latestAt: g.latestAt,
       })),
     };
   },
 });
 
-// Dead-letter replay: an admin sends a failed notification again after fixing the cause.
-export const retry = mutation({
-  args: { id: v.id("events") },
-  handler: async (ctx, { id }) => {
+// After fixing the cause: send every failed notification again (up to 100 at a time).
+export const retryAll = mutation({
+  args: {},
+  handler: async (ctx) => {
     const me = await requireAdmin(ctx);
-    const e = await ctx.db.get(id);
-    requireThat(e && e.state === "failed", "Only failed notifications can be retried.");
-    await ctx.db.patch(id, { state: "pending", attempts: 0, leaseUntil: 0, error: undefined });
-    await audit(ctx, me.subject, "notification.retried", id);
-    await ctx.scheduler.runAfter(0, internal.notify.send, { id });
+    const failed = await ctx.db
+      .query("events")
+      .withIndex("state", (q) => q.eq("state", "failed"))
+      .take(100);
+    for (const e of failed) {
+      await ctx.db.patch(e._id, { state: "pending", attempts: 0, leaseUntil: 0, error: undefined });
+      await ctx.scheduler.runAfter(0, internal.notify.send, { id: e._id });
+    }
+    await audit(ctx, me.subject, "notifications.retried", String(failed.length));
+    return failed.length;
+  },
+});
+
+// Mark one group of workflow failures as handled. Kept in the table, hidden from the panel.
+export const dismissRuns = mutation({
+  args: { workflow: v.string(), node: v.string(), message: v.string() },
+  handler: async (ctx, a) => {
+    const me = await requireAdmin(ctx);
+    const open = await ctx.db
+      .query("automationFailures")
+      .withIndex("open", (q) => q.eq("resolvedAt", undefined))
+      .filter((q) =>
+        q.and(q.eq(q.field("workflow"), a.workflow), q.eq(q.field("node"), a.node), q.eq(q.field("message"), a.message)),
+      )
+      .take(500);
+    const now = Date.now();
+    for (const r of open) await ctx.db.patch(r._id, { resolvedAt: now });
+    await audit(ctx, me.subject, "workflow-failures.dismissed", `${a.workflow}: ${open.length}`);
+    return open.length;
   },
 });

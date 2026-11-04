@@ -6,10 +6,10 @@ import { formatDay, formatRange } from "./format";
 type Range = { start: string; end: string };
 export type Selection = { start: string | null; end: string | null };
 
-const pad = (n: number) => String(n).padStart(2, "0");
+const pad = (n: number) => String(n).padStart(2, "0"); // taste-skill-ignore: ISO dates
 const iso = (y: number, m: number, d: number) => `${y}-${pad(m + 1)}-${pad(d)}`;
 const parts = (day: string) => day.split("-").map(Number) as [number, number, number];
-const monthStart = (day: string) => day.slice(0, 8) + "01";
+const monthStart = (day: string) => day.slice(0, 8) + "01"; // taste-skill-ignore: ISO date
 const addMonths = (day: string, n: number) => {
   const [y, m] = parts(day);
   const d = new Date(y, m - 1 + n, 1);

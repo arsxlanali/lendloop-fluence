@@ -4,6 +4,7 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { actor, requireAdmin, requireThat } from "./access";
 import { loanView, notify, rememberProfile } from "./model";
+import { blockBetween, findConversation, post } from "./chat";
 import { loanStatus } from "./schema";
 import {
   addDays,
@@ -31,6 +32,8 @@ export const requestLoan = mutation({
     const t = await ctx.db.get(a.toolId);
     requireThat(t && !t.deleted, "That listing is no longer available.");
     requireThat(t.owner !== me.subject, "You can't borrow your own tool.");
+    const block = await blockBetween(ctx, me.subject, t.owner);
+    requireThat(!block.iBlocked && !block.theyBlocked, "You can't contact this neighbor.");
     const pending = await ctx.db
       .query("loans")
       .withIndex("borrowerStatus", (q) => q.eq("borrower", me.subject).eq("status", "pending"))
@@ -58,9 +61,14 @@ export const requestLoan = mutation({
       owner: t.owner,
       borrower: me.subject,
       status: "pending",
-      requestNote: note || undefined,
     });
     await notify(ctx, { loanId: id, kind: "requested", recipient: t.owner, actor: me.subject });
+    // The note goes into the conversation, right after the "requested" line. The request
+    // notification already tells the owner, so no separate message notification.
+    if (note) {
+      const conversation = (await findConversation(ctx, t._id, me.subject))!;
+      await post(ctx, conversation, { author: me.subject, body: note }, t.owner);
+    }
     return id;
   },
 });
@@ -88,7 +96,7 @@ export const decide = mutation({
   handler: async (ctx, { id, approve, today, note }) => {
     const me = await actor(ctx);
     checkClientToday(today);
-    const handoverNote = cleanText(note ?? "", LIMITS.noteLength, "Message", false);
+    const handover = cleanText(note ?? "", LIMITS.noteLength, "Message", false);
     const l = await ctx.db.get(id);
     requireThat(l && l.owner === me.subject, "You can only answer requests for your own tools.");
     requireThat(l.status === "pending", "This request has already been answered.");
@@ -108,8 +116,14 @@ export const decide = mutation({
       !booked.some((x) => overlaps(l.start, l.end, x.start, x.end)),
       "Another approved loan overlaps these dates.",
     );
-    await ctx.db.patch(id, { status: "approved", handoverNote: handoverNote || undefined });
+    await ctx.db.patch(id, { status: "approved" });
     await notify(ctx, { loanId: id, kind: "approved", recipient: l.borrower, actor: me.subject });
+    // Hand-over details go into the conversation, under the "approved" line. The approval
+    // notification already tells the borrower, so no separate message notification.
+    if (handover) {
+      const conversation = (await findConversation(ctx, l.toolId, l.borrower))!;
+      await post(ctx, conversation, { author: me.subject, body: handover }, l.borrower);
+    }
     // Requests for the same dates can no longer be met: answer them now instead of leaving
     // those neighbors waiting.
     const others = await ctx.db

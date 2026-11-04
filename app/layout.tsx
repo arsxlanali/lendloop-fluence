@@ -25,12 +25,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </ClerkProvider>
         ) : (
           <main className="container setup">
-            <p className="eyebrow">LendLoop · setup needed</p>
-            <h1>
-              Good neighbors.
-              <br />
-              Great tools.
-            </h1>
+            <h1>LendLoop needs setting up</h1>
             <p>
               Set the Clerk and Convex variables from <code>.env.example</code> to connect the board.
               The README walks through it.

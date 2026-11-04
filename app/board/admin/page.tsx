@@ -11,12 +11,26 @@ type Status = "pending" | "approved" | "declined" | "cancelled" | "expired" | "r
 
 function AutomationHealth() {
   const failures = useQuery(api.notify.failures);
-  const retry = useMutation(api.notify.retry);
+  const retryAll = useMutation(api.notify.retryAll);
+  const dismiss = useMutation(api.notify.dismissRuns);
   const { busy, error, run } = useRunner();
-  const problems = failures ? failures.deliveries.length + failures.runs.length : 0;
+  const failedNotifications = failures?.deliveries.reduce((n, d) => n + d.count, 0) ?? 0;
   return (
     <section aria-labelledby="health" className="section">
-      <h2 id="health">Automation health</h2>
+      <div className="section-title-row">
+        <h2 id="health">Automation health</h2>
+        {failedNotifications > 0 && (
+          <button
+            className="secondary"
+            disabled={busy !== null}
+            onClick={() =>
+              run("retry", () => retryAll({}), `${failedNotifications} notification${failedNotifications === 1 ? "" : "s"} queued again.`)
+            }
+          >
+            Retry all failed notifications
+          </button>
+        )}
+      </div>
       {error && (
         <p role="alert" className="error">
           {error}
@@ -24,30 +38,43 @@ function AutomationHealth() {
       )}
       {!failures ? (
         <p className="empty">Loading…</p>
-      ) : problems === 0 ? (
+      ) : failures.deliveries.length + failures.runs.length === 0 ? (
         <p className="health ok">All notifications delivered and every workflow run succeeded.</p>
       ) : (
         <ul className="failures">
           {failures.deliveries.map((d) => (
-            <li key={d._id}>
-              <span>
-                <strong>Notification “{d.kind.replaceAll("_", " ")}” failed</strong> after {d.attempts} attempts,{" "}
-                {ago(d.at)}: {d.error}
+            <li key={`d:${d.kind}:${d.error}`}>
+              <span className="failure-count" aria-label={`${d.count} times`}>
+                ×{d.count}
+              </span>
+              <span className="failure-text">
+                <strong>“{d.kind.replaceAll("_", " ")}” notification{d.count === 1 ? "" : "s"} failed</strong>
+                <span>
+                  {d.error} · latest {ago(d.latestAt)}
+                </span>
+              </span>
+            </li>
+          ))}
+          {failures.runs.map((r) => (
+            <li key={`r:${r.workflow}:${r.node}:${r.message}`}>
+              <span className="failure-count" aria-label={`${r.count} times`}>
+                ×{r.count}
+              </span>
+              <span className="failure-text">
+                <strong>{r.workflow}</strong>
+                <span>
+                  Failed at “{r.node}”: {r.message} · latest {ago(r.latestAt)}
+                </span>
               </span>
               <button
                 className="secondary"
                 disabled={busy !== null}
-                onClick={() => run(`retry:${d._id}`, () => retry({ id: d._id }), "Notification queued again.")}
+                onClick={() =>
+                  run(`dismiss:${r.workflow}${r.node}${r.message}`, () => dismiss({ workflow: r.workflow, node: r.node, message: r.message }), "Marked as handled.")
+                }
               >
-                Retry
+                Dismiss<span className="visually-hidden"> {r.workflow} failures</span>
               </button>
-            </li>
-          ))}
-          {failures.runs.map((r) => (
-            <li key={r._id}>
-              <span>
-                <strong>{r.workflow}</strong> failed at “{r.node}” {ago(r.at)}: {r.message}
-              </span>
             </li>
           ))}
         </ul>

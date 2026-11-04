@@ -6,7 +6,8 @@ import { api } from "../convex/_generated/api";
 import { activityLabel, ago, formatRange, isAutomation, loanState } from "./format";
 import { useRunner, useToday } from "./hooks";
 import { ConfirmDialog, Modal, Pill, Skeletons } from "./ui";
-import { Thread } from "./Thread";
+import Link from "next/link";
+import { Avatar } from "./bits";
 import { LIMITS } from "../lib/policy";
 
 type Dialog = "approve" | "decline" | "cancelRequest" | "cancelBooking" | null;
@@ -44,7 +45,7 @@ function ApproveDialog({ loan, onClose }: { loan: LoanView; onClose: () => void 
             value={note}
             maxLength={LIMITS.noteLength}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="Where and when to pick it up. Only they will see this."
+            placeholder="Where and when to pick it up. It's sent to them as a message."
           />
         </label>
         <div className="actions end">
@@ -70,8 +71,6 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
   const historyId = useId();
   const [dialog, setDialog] = useState<Dialog>(null);
   const [showHistory, setShowHistory] = useState(false);
-  const [showMessages, setShowMessages] = useState(false);
-  const messagesId = useId();
   const { busy, error, run } = useRunner();
   const state = loanState(loan, today);
   const started = loan.start <= today;
@@ -92,7 +91,8 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
         <p className="loan-meta">
           <span>{formatRange(loan.start, loan.end)}</span>
           {loan.counterpart && (
-            <span>
+            <span className="person">
+              <Avatar name={loan.counterpart.name} size={20} />
               {loan.role === "owner" ? "Requested by" : "Lent by"} {loan.counterpart.name}
             </span>
           )}
@@ -102,17 +102,6 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
             </span>
           )}
         </p>
-        {loan.lastMessage && !showMessages && (
-          <p className="preview">
-            <span>{loan.lastMessage.mine ? "You" : other}:</span> {loan.lastMessage.body}
-          </p>
-        )}
-        {loan.handoverNote && (
-          <blockquote>
-            <span>{loan.role === "owner" ? "Your hand-over details" : "Hand-over details"}</span>
-            {loan.handoverNote}
-          </blockquote>
-        )}
         {loan.status === "approved" && loan.returnReported && !readOnly && (
           <p className="notice">
             {owner
@@ -139,15 +128,11 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
               History<span className="visually-hidden"> of the {loan.toolName} loan</span>
             </button>
           )}
-          {(owner || borrower) && (
-            <button
-              type="button"
+          {(owner || borrower) && loan.conversationId && (
+            <Link
+              href={`/board/messages?c=${loan.conversationId}`}
               className={loan.unread ? "history-toggle has-unread" : "history-toggle"}
-              aria-expanded={showMessages}
-              aria-controls={messagesId}
-              onClick={() => setShowMessages((open) => !open)}
             >
-              <span className="chevron" aria-hidden="true" />
               Messages<span className="visually-hidden"> with {other}</span>
               {loan.unread > 0 && (
                 <span className="unread">
@@ -155,7 +140,7 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
                   <span className="visually-hidden"> unread</span>
                 </span>
               )}
-            </button>
+            </Link>
           )}
           {lastAutomation && (
             <span className="automation">
@@ -175,8 +160,6 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
             ))}
           </ol>
         )}
-        {/* Mounted only while open: a closed card holds no message subscription. */}
-        <div id={messagesId}>{showMessages && <Thread loanId={loan._id} />}</div>
       </div>
       <div className="loan-actions">
         {owner && loan.status === "pending" && (

@@ -99,6 +99,11 @@ n8n schedule (daily 09:00 UTC): claim 100 overdue ─► send (mock) ─► repo
 n8n error workflow: any failed run ─► POST /automation/failures ─► admin page
 ```
 
+**Messages.** `conversations` has one row per tool and borrower; `inbox` has one row per
+participant (unread count, last activity), so the Messages tab lists all of a person's
+conversations, lending and borrowing, newest first, from one index; `messages` holds text and
+the lines that loan changes add ("Sam requested Nov 5 – 7"). Updates are live for both sides.
+
 **Code layout**
 
 | Path | What |
@@ -138,6 +143,8 @@ n8n error workflow: any failed run ─► POST /automation/failures ─► admin
 | Browse with descriptions, condition, availability, category filter | | ✓ | ✓ |
 | Create / edit / remove own listings | | ✓ (max 50 active) | ✓ |
 | Request a tool (not their own; ≤ 90 days; ≤ 10 open requests) | | ✓ | ✓ |
+| Ask an owner about a tool, message about requests and loans (Messages tab) | | ✓ | ✓ (only their own conversations) |
+| Block a person (no messages or requests between you, on any item) | | ✓ | ✓ |
 | Add a message to a request · cancel it · report own return | | ✓ | ✓ |
 | Approve (with optional hand-over details) / decline · confirm or dispute a return (once the loan has started) | | owner of the tool | owner of the tool |
 | Cancel an approved booking before it starts (the other side is told) | | owner or borrower | owner or borrower |
@@ -206,10 +213,13 @@ name and the dates. No descriptions, no IDs of other people, nothing about the o
   descriptions or dates.
 - **Personal data:** `users` holds only a name and an email, copied from the verified token
   (never from client arguments). The email is used only to send notifications: no user, admin
-  or page ever sees another person's email. Participants see each other's name and the short
-  messages they chose to write (a note with the request, hand-over details with the approval),
-  so sharing contact details is each person's decision. Admins see names, not messages. The
-  listing form asks people not to put addresses or phone numbers in public descriptions.
+  or page ever sees another person's email. Neighbors talk in **conversations**, one per tool
+  and borrower, so sharing contact details is each person's decision. Only the two participants
+  can read a conversation (admins can't); a person can block another (no messages or requests
+  between them, on any item). Message text never leaves Convex: the notification only says that
+  there is a new message, once per unread batch. Limits: 1,000 characters, 10 messages a minute
+  per conversation, 20 new conversations a day per person. The listing form asks people not to
+  put addresses or phone numbers in public descriptions.
 - **Logs:** Convex logs event IDs and error codes, never names or emails. n8n logs mock messages
   with the address masked and keeps no data from successful executions.
 - **Audit:** admin actions (removals, trust changes, notification replays) are written to

@@ -10,6 +10,7 @@
 
 import type * as access from "../access.js";
 import type * as automation from "../automation.js";
+import type * as chat from "../chat.js";
 import type * as crons from "../crons.js";
 import type * as http from "../http.js";
 import type * as loans from "../loans.js";
@@ -28,6 +29,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   access: typeof access;
   automation: typeof automation;
+  chat: typeof chat;
   crons: typeof crons;
   http: typeof http;
   loans: typeof loans;

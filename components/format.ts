@@ -81,6 +81,39 @@ export function loanState(
   }
 }
 
+// A loan change as a line in a conversation: "Sam requested Nov 5 – 7", "You approved".
+export function eventText(
+  event: string,
+  by: "me" | "them" | "system",
+  otherName: string,
+  dates: { start: string; end: string } | null,
+) {
+  const who = by === "me" ? "You" : by === "them" ? otherName : "";
+  const range = dates ? ` ${formatRange(dates.start, dates.end)}` : "";
+  switch (event) {
+    case "requested":
+      return `${who} requested${range}`;
+    case "approved":
+      return `${who} approved${range}`;
+    case "declined":
+      return `${who} declined the request`;
+    case "cancelled":
+      return `${who} cancelled the request`;
+    case "expired":
+      return `The request for${range} expired`;
+    case "return_reported":
+      return `${who} reported the return`;
+    case "return_disputed":
+      return `${who} said it isn't back yet`;
+    case "returned":
+      return `${who} confirmed the return`;
+    case "booking_cancelled":
+      return `${who} cancelled the booking for${range}`;
+    default:
+      return event.replaceAll("_", " ");
+  }
+}
+
 export const STATUS: Record<string, string> = {
   pending: "Waiting for answer",
   approved: "Approved",
@@ -89,3 +122,20 @@ export const STATUS: Record<string, string> = {
   expired: "Expired",
   returned: "Returned",
 };
+
+// Each category has its own pale tint with the dark of the same hue as ink (the screen's face).
+const CATEGORY_CLASS: Record<string, string> = {
+  "Power tools": "cat-power",
+  Garden: "cat-garden",
+  Kitchen: "cat-kitchen",
+  Camping: "cat-camping",
+  Other: "cat-other",
+};
+export const categoryClass = (category: string) => CATEGORY_CLASS[category] ?? "cat-other";
+
+// A stable hue per person, so the same neighbor always has the same initial colour.
+export function personHue(name: string) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}

@@ -4,7 +4,7 @@ import { ConvexError, v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import { actor, requireAdmin, requireThat, type Actor } from "./access";
 import { audit, availability, isTrusted, notify, rememberProfile } from "./model";
-import { categories, checkClientToday, cleanText, LIMITS } from "../lib/policy";
+import { addDays, categories, checkClientToday, cleanText, LIMITS } from "../lib/policy";
 
 function checkCategory(category: string) {
   if (!(categories as readonly string[]).includes(category))
@@ -60,7 +60,20 @@ async function toolView(
     mine: t.owner === me.subject,
     trusted: trustedCache.get(t.owner)!,
     ...(await availability(ctx, t._id, today)),
+    soon: await bookedSoon(ctx, t._id, today),
   };
+}
+
+// Booked ranges in the next 14 days, for the card's availability strip. Ranges only: nothing
+// about who borrows. Approved loans don't overlap, so a handful covers two weeks.
+export const STRIP_DAYS = 14;
+async function bookedSoon(ctx: QueryCtx, toolId: Doc<"tools">["_id"], today: string) {
+  const last = addDays(today, STRIP_DAYS - 1);
+  const loans = await ctx.db
+    .query("loans")
+    .withIndex("tool", (q) => q.eq("toolId", toolId).eq("status", "approved").gte("end", today))
+    .take(STRIP_DAYS);
+  return loans.filter((l) => l.start <= last).map((l) => ({ start: l.start, end: l.end }));
 }
 
 export const browse = query({

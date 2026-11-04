@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "brag-slim": {
+      "source": "latent-spaces/brag",
+      "sourceType": "github",
+      "skillPath": "skills/brag-slim/SKILL.md",
+      "computedHash": "2bd6f704826635236b91d7d19a6d8d75f1dd8fc6de234a1e2eb645282b021298"
+    },
     "convex": {
       "source": "convex/agent-skills",
       "sourceType": "github",
@@ -231,6 +237,12 @@
       "skillPath": "skills/convex-verify/SKILL.md",
       "computedHash": "dbe65a37ca2e9a5afa55669b8928ce1dc3ac765151452008f9105bde049228f7",
       "installMode": "copy"
+    },
+    "design-taste-frontend": {
+      "source": "Leonxlnx/taste-skill",
+      "sourceType": "github",
+      "skillPath": "skills/taste-skill/SKILL.md",
+      "computedHash": "6ac8ba6089dcbc303744a507a4587113c5d845ca2f658b3ce2b0b5eab108fb0d"
     }
   }
 }

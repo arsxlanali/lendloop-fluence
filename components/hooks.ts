@@ -2,7 +2,7 @@
 import { createContext, createElement, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { ConvexError } from "convex/values";
 
-const pad = (n: number) => String(n).padStart(2, "0");
+const pad = (n: number) => String(n).padStart(2, "0"); // taste-skill-ignore: ISO dates
 
 export function localDay(d = new Date()) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;

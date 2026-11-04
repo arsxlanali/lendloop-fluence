@@ -181,11 +181,18 @@ describe("authorization is enforced on the server", () => {
     await s.owner.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY, note: "Side gate, Sat 10am" });
     const [asOwner] = (await s.owner.query(api.loans.incoming, { paginationOpts: page })).page;
     const [asBorrower] = (await s.borrower.query(api.loans.myRequests, { paginationOpts: page })).page;
-    expect(asOwner).toMatchObject({ counterpart: { name: "BORROWER" }, requestNote: "For a shelf", handoverNote: "Side gate, Sat 10am" });
-    expect(asBorrower).toMatchObject({ counterpart: { name: "OWNER" }, requestNote: "For a shelf", handoverNote: "Side gate, Sat 10am" });
+    expect(asOwner).toMatchObject({ counterpart: { name: "BORROWER" } });
+    expect(asBorrower).toMatchObject({ counterpart: { name: "OWNER" } });
+    // The request note and the hand-over details are messages in their conversation.
+    expect(asOwner.conversationId).toBe(asBorrower.conversationId);
+    const thread = await s.borrower.query(api.messages.conversation, { conversationId: asBorrower.conversationId! });
+    expect(thread.messages.filter((m) => !m.event).map((m) => [m.by, m.body])).toEqual([
+      ["me", "For a shelf"],
+      ["them", "Side gate, Sat 10am"],
+    ]);
     const [asAdmin] = (await s.admin.query(api.loans.adminLoans, { paginationOpts: page })).page;
     expect(asAdmin).toMatchObject({ role: "admin", ownerName: "OWNER", borrowerName: "BORROWER" });
-    expect([asAdmin.counterpart, asAdmin.requestNote, asAdmin.handoverNote]).toEqual([undefined, undefined, undefined]);
+    expect([asAdmin.counterpart, asAdmin.conversationId]).toEqual([undefined, undefined]);
     for (const view of [asOwner, asBorrower, asAdmin]) expect(JSON.stringify(view)).not.toContain("@example.com");
     expect(await message(s.borrower.mutation(api.loans.requestLoan, {
       toolId: tool, start: "2026-11-20", end: "2026-11-21", today: TODAY, note: "x".repeat(501),
@@ -401,7 +408,18 @@ describe("signed automation HTTP", () => {
     const body = JSON.stringify({ executionId: "42", workflow: "LendLoop - Overdue reminders", node: "Send report to Convex", message: "HTTP 500" });
     expect(await (await s.t.fetch(path, await signed(path, body))).json()).toEqual({ recorded: true });
     expect(await (await s.t.fetch(path, await signed(path, body))).json()).toEqual({ recorded: false });
-    expect((await s.admin.query(api.notify.failures, {})).runs).toMatchObject([{ workflow: "LendLoop - Overdue reminders", message: "HTTP 500" }]);
+    expect((await s.admin.query(api.notify.failures, {})).runs).toMatchObject([{ workflow: "LendLoop - Overdue reminders", message: "HTTP 500", count: 1 }]);
+    // The same failure again (another execution) groups into one row with a count.
+    const again = JSON.stringify({ executionId: "43", workflow: "LendLoop - Overdue reminders", node: "Send report to Convex", message: "HTTP 500" });
+    await s.t.fetch(path, await signed(path, again));
+    expect((await s.admin.query(api.notify.failures, {})).runs).toMatchObject([{ count: 2 }]);
+    // Dismissing hides the group (admins only) and is audited.
+    const group = { workflow: "LendLoop - Overdue reminders", node: "Send report to Convex", message: "HTTP 500" };
+    await expect(s.owner.mutation(api.notify.dismissRuns, group)).rejects.toThrow(ConvexError);
+    expect(await s.admin.mutation(api.notify.dismissRuns, group)).toBe(2);
+    expect((await s.admin.query(api.notify.failures, {})).runs).toEqual([]);
+    const audit = await s.t.run((ctx) => ctx.db.query("audit").collect());
+    expect(audit.map((a) => a.action)).toContain("workflow-failures.dismissed");
   });
 });
 
@@ -424,9 +442,10 @@ describe("notification outbox", () => {
     expect((await get())!.state).toBe("failed");
     const kinds = (await s.t.run((ctx) => ctx.db.query("activity").collect())).map((a) => a.kind);
     expect(kinds).toContain("notification_failed");
-    expect((await s.admin.query(api.notify.failures, {})).deliveries).toMatchObject([{ kind: "requested", attempts: 6 }]);
-    await expect(s.owner.mutation(api.notify.retry, { id: event._id })).rejects.toThrow(ConvexError);
-    await s.admin.mutation(api.notify.retry, { id: event._id });
+    expect((await s.admin.query(api.notify.failures, {})).deliveries).toMatchObject([{ kind: "requested", count: 1 }]);
+    await expect(s.owner.mutation(api.notify.retryAll, {})).rejects.toThrow(ConvexError);
+    expect(await s.admin.mutation(api.notify.retryAll, {})).toBe(1);
+    expect((await s.admin.query(api.notify.failures, {})).deliveries).toEqual([]);
     expect(await get()).toMatchObject({ state: "pending", attempts: 0 });
     expect(loan).toBeTruthy();
   });
@@ -448,57 +467,104 @@ describe("notification outbox", () => {
   });
 });
 
-describe("messages between the two people on a loan", () => {
-  test("only participants read and write; the request note opens the thread", async () => {
+describe("conversations: one per item and neighbor", () => {
+  const thread = async (who: Setup["owner"], conversationId: Id<"conversations">) =>
+    (await who.query(api.messages.conversation, { conversationId })).messages.map((m) =>
+      m.event ? `${m.by} ${m.event}` : `${m.by}: ${m.body}`,
+    );
+
+  test("ask before requesting; the request and its changes join the same conversation", async () => {
     const s = setup();
     const tool = await s.owner.mutation(api.tools.saveTool, fields);
+    // Before any message: a draft, nothing stored yet.
+    const draft = await s.borrower.query(api.messages.conversation, { toolId: tool });
+    expect(draft).toMatchObject({ conversationId: null, open: true, otherName: "OWNER", messages: [] });
+    const c = await s.borrower.mutation(api.messages.send, { toolId: tool, body: "  Does it come with a battery?  " });
+    expect(await s.borrower.mutation(api.messages.send, { toolId: tool, body: "And a case?" })).toBe(c);
     const loan = await s.borrower.mutation(api.loans.requestLoan, {
       toolId: tool, start: "2026-11-05", end: "2026-11-07", today: TODAY, note: "For a shelf",
     });
-    await s.owner.mutation(api.messages.send, { loanId: loan, body: "  Sure, Saturday?  " });
-    const asBorrower = await s.borrower.query(api.messages.list, { loanId: loan });
-    expect(asBorrower).toMatchObject({ open: true, otherName: "OWNER", unread: true });
-    expect(asBorrower.messages.map((m) => [m.mine, m.body])).toEqual([
-      [true, "For a shelf"],
-      [false, "Sure, Saturday?"],
+    await s.owner.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY });
+    expect(await thread(s.owner, c)).toEqual([
+      "them: Does it come with a battery?",
+      "them: And a case?",
+      "them requested",
+      "them: For a shelf",
+      "me approved",
     ]);
-    for (const outsider of [s.stranger, s.admin]) {
-      await expect(outsider.query(api.messages.list, { loanId: loan })).rejects.toThrow(ConvexError);
-      await expect(outsider.mutation(api.messages.send, { loanId: loan, body: "hi" })).rejects.toThrow(ConvexError);
-    }
-    expect(await message(s.borrower.mutation(api.messages.send, { loanId: loan, body: "   " }))).toMatch(/Message is required/);
+    const [card] = (await s.owner.query(api.loans.incoming, { paginationOpts: page })).page;
+    expect(card.conversationId).toBe(c);
+    await expect(s.owner.mutation(api.messages.send, { toolId: tool, body: "hi" })).rejects.toThrow(/your own listing/);
   });
 
-  test("unread counts, read markers and one notification per unread batch", async () => {
+  test("the inbox lists every conversation, newest first, with unread counts and role filters", async () => {
     const s = setup();
-    const { loan } = await listAndRequest(s);
-    for (const body of ["Is it charged?", "And does it have a case?"])
-      await s.borrower.mutation(api.messages.send, { loanId: loan, body });
-    expect(await s.owner.query(api.messages.unreadCounts, {})).toEqual({ incoming: 2, requests: 0 });
-    const [card] = (await s.owner.query(api.loans.incoming, { paginationOpts: page })).page;
-    expect(card).toMatchObject({ unread: 2, lastMessage: { mine: false, body: "And does it have a case?" } });
+    const drill = await s.owner.mutation(api.tools.saveTool, fields);
+    const tent = await s.stranger.mutation(api.tools.saveTool, { ...fields, name: "Tent" });
+    await s.borrower.mutation(api.messages.send, { toolId: drill, body: "Is the drill free Friday?" });
+    vi.setSystemTime(new Date(`${TODAY}T10:01:00Z`));
+    await s.stranger.mutation(api.messages.send, { toolId: drill, body: "Can I borrow it too?" });
+    vi.setSystemTime(new Date(`${TODAY}T10:02:00Z`));
+    await s.owner.mutation(api.messages.send, { toolId: tent, body: "Is the tent waterproof?" });
+    const inbox = await s.owner.query(api.messages.inbox, { paginationOpts: page });
+    expect(inbox.page.map((r) => [r.toolName, r.otherName, r.role, r.unread])).toEqual([
+      ["Tent", "STRANGER", "borrower", 0],
+      ["Cordless drill", "STRANGER", "owner", 1],
+      ["Cordless drill", "BORROWER", "owner", 1],
+    ]);
+    const lending = await s.owner.query(api.messages.inbox, { role: "owner", paginationOpts: page });
+    expect(lending.page).toHaveLength(2);
+    expect(await s.owner.query(api.messages.unreadTotal, {})).toBe(2);
+    await s.owner.mutation(api.messages.markRead, { conversationId: inbox.page[1]._id });
+    expect(await s.owner.query(api.messages.unreadTotal, {})).toBe(1);
+  });
+
+  test("only the two people can read; notifications once per unread batch, never with text", async () => {
+    const s = setup();
+    const tool = await s.owner.mutation(api.tools.saveTool, fields);
+    const c = await s.borrower.mutation(api.messages.send, { toolId: tool, body: "Is it charged?" });
+    await s.borrower.mutation(api.messages.send, { conversationId: c, body: "And does it have a case?" });
+    for (const outsider of [s.stranger, s.admin]) {
+      await expect(outsider.query(api.messages.conversation, { conversationId: c })).rejects.toThrow(ConvexError);
+      await expect(outsider.mutation(api.messages.send, { conversationId: c, body: "hi" })).rejects.toThrow(ConvexError);
+    }
     const events = async () => (await s.t.run((ctx) => ctx.db.query("events").collect())).filter((e) => e.kind === "message");
     expect((await events()).map((e) => e.recipient)).toEqual(["owner"]);
-    await s.owner.mutation(api.messages.markRead, { loanId: loan });
-    expect(await s.owner.query(api.messages.unreadCounts, {})).toEqual({ incoming: 0, requests: 0 });
+    await s.owner.mutation(api.messages.markRead, { conversationId: c });
     vi.setSystemTime(new Date(`${TODAY}T10:05:00Z`));
-    await s.borrower.mutation(api.messages.send, { loanId: loan, body: "Thanks!" });
-    expect((await events()).map((e) => e.recipient)).toEqual(["owner", "owner"]);
-    // Messages are not loan history, and the text never goes to the webhook.
-    const kinds = (await s.t.run((ctx) => ctx.db.query("activity").collect())).map((a) => a.kind);
-    expect(kinds).not.toContain("message");
+    await s.borrower.mutation(api.messages.send, { conversationId: c, body: "Thanks!" });
+    expect(await events()).toHaveLength(2);
     const payload = await s.t.query(internal.notify.message, { id: (await events())[0]._id });
     expect(JSON.stringify(payload)).not.toMatch(/charged|case|Thanks/);
+    expect(await message(s.borrower.mutation(api.messages.send, { conversationId: c, body: "   " }))).toMatch(/Message is required/);
   });
 
-  test("closed once the loan is finished; sending is rate-limited", async () => {
+  test("blocking stops messages and requests both ways, on every item; unblocking restores them", async () => {
     const s = setup();
-    const { loan } = await listAndRequest(s);
-    for (let i = 0; i < 10; i++) await s.borrower.mutation(api.messages.send, { loanId: loan, body: `m${i}` });
-    expect(await message(s.borrower.mutation(api.messages.send, { loanId: loan, body: "one more" }))).toMatch(/too quickly/);
-    await s.owner.mutation(api.loans.decide, { id: loan, approve: false, today: TODAY });
-    expect((await s.borrower.query(api.messages.list, { loanId: loan })).open).toBe(false);
+    const drill = await s.owner.mutation(api.tools.saveTool, fields);
+    const tent = await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Tent" });
+    const c = await s.borrower.mutation(api.messages.send, { toolId: drill, body: "Hi" });
+    await expect(s.stranger.mutation(api.messages.setBlocked, { conversationId: c, blocked: true })).rejects.toThrow(ConvexError);
+    await s.owner.mutation(api.messages.setBlocked, { conversationId: c, blocked: true });
+    expect(await message(s.borrower.mutation(api.messages.send, { conversationId: c, body: "Hello?" }))).toMatch(/can't message/);
+    expect(await message(s.borrower.mutation(api.messages.send, { toolId: tent, body: "And the tent?" }))).toMatch(/can't message/);
+    expect(await message(s.borrower.mutation(api.loans.requestLoan, { toolId: tent, start: "2026-11-05", end: "2026-11-06", today: TODAY }))).toMatch(/can't contact/);
+    expect(await message(s.owner.mutation(api.messages.send, { conversationId: c, body: "Sorry" }))).toMatch(/can't message/);
+    expect((await s.owner.query(api.messages.conversation, { conversationId: c })).reason).toBe("blocked-by-me");
+    expect((await s.borrower.query(api.messages.conversation, { conversationId: c })).reason).toBe("blocked");
+    await s.owner.mutation(api.messages.setBlocked, { conversationId: c, blocked: false });
+    await s.borrower.mutation(api.messages.send, { conversationId: c, body: "Thanks for unblocking" });
+  });
+
+  test("closed once the listing is gone and nothing is open; sending is rate-limited", async () => {
+    const s = setup();
+    const tool = await s.owner.mutation(api.tools.saveTool, fields);
+    const c = await s.borrower.mutation(api.messages.send, { toolId: tool, body: "m0" });
+    for (let i = 1; i < 10; i++) await s.borrower.mutation(api.messages.send, { conversationId: c, body: `m${i}` });
+    expect(await message(s.borrower.mutation(api.messages.send, { conversationId: c, body: "one more" }))).toMatch(/too quickly/);
+    await s.owner.mutation(api.tools.removeTool, { id: tool });
     vi.setSystemTime(new Date(`${TODAY}T10:05:00Z`));
-    expect(await message(s.owner.mutation(api.messages.send, { loanId: loan, body: "hello?" }))).toMatch(/closed/);
+    expect((await s.borrower.query(api.messages.conversation, { conversationId: c })).open).toBe(false);
+    expect(await message(s.borrower.mutation(api.messages.send, { conversationId: c, body: "hello?" }))).toMatch(/removed/);
   });
 });

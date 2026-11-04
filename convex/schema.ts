@@ -41,17 +41,10 @@ export default defineSchema({
     start: v.string(),
     end: v.string(),
     status: loanStatus,
-    // Optional messages between the two neighbors, written by them and shown only to them:
-    // contact details are shared only if a user chooses to write them here.
-    requestNote: v.optional(v.string()),
-    handoverNote: v.optional(v.string()),
     // The borrower says the tool is back; the owner confirms (or says it isn't). Until then
     // the loan stays open and the tool unavailable.
     returnReportedAt: v.optional(v.number()),
     lastReminder: v.optional(v.string()),
-    // When each side last read the loan's messages (for unread counts).
-    ownerReadAt: v.optional(v.number()),
-    borrowerReadAt: v.optional(v.number()),
   })
     .index("tool", ["toolId", "status", "end"])
     .index("owner", ["owner"])
@@ -60,14 +53,48 @@ export default defineSchema({
     .index("borrowerStatus", ["borrower", "status"])
     .index("statusEnd", ["status", "end"]),
 
-  // Conversation between the two people on a loan. Only they can read it; message text never
-  // leaves Convex (notifications only say that there is a new message).
+  // One conversation per item and neighbor: everything between a tool's owner and one borrower
+  // (questions, requests, status changes) in one place. Only the two of them can read it; message
+  // text never leaves Convex (notifications only say that there is a new message).
+  conversations: defineTable({
+    toolId: v.id("tools"),
+    owner: v.string(),
+    borrower: v.string(),
+    lastMessageAt: v.number(),
+  })
+    .index("pair", ["toolId", "borrower"])
+    .index("borrower", ["borrower"]),
+
+  // Each participant's view of a conversation: what the Messages tab lists, newest first.
+  inbox: defineTable({
+    subject: v.string(),
+    conversationId: v.id("conversations"),
+    role: v.union(v.literal("owner"), v.literal("borrower")),
+    lastMessageAt: v.number(),
+    unread: v.number(),
+  })
+    .index("recent", ["subject", "lastMessageAt"])
+    .index("roleRecent", ["subject", "role", "lastMessageAt"])
+    .index("unread", ["subject", "unread"])
+    .index("conversation", ["conversationId", "subject"]),
+
+  // Text from a participant, or a line about a loan change (event set; author is who did it,
+  // or "system").
   messages: defineTable({
-    loanId: v.id("loans"),
+    conversationId: v.id("conversations"),
     author: v.string(),
     body: v.string(),
     at: v.number(),
-  }).index("loan", ["loanId", "at"]),
+    event: v.optional(v.string()),
+    eventLoanId: v.optional(v.id("loans")),
+  }).index("conversation", ["conversationId", "at"]),
+
+  // A person who blocked another: no messages and no requests between them, on any item.
+  blocks: defineTable({
+    blocker: v.string(),
+    blocked: v.string(),
+    at: v.number(),
+  }).index("pair", ["blocker", "blocked"]),
 
   trusted: defineTable({
     subject: v.string(),
@@ -128,5 +155,9 @@ export default defineSchema({
     node: v.string(),
     message: v.string(),
     at: v.number(),
-  }).index("execution", ["executionId"]),
+    // Set when an admin dismisses it (cause handled); kept for the record.
+    resolvedAt: v.optional(v.number()),
+  })
+    .index("execution", ["executionId"])
+    .index("open", ["resolvedAt"]),
 });
