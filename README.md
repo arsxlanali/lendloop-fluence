@@ -1,4 +1,4 @@
-<img width="800" height="450" alt="preview" src="https://github.com/user-attachments/assets/5e14b7bd-f5f2-4ee4-bd9a-43cc42c254a6" />
+<img src="docs/demo.gif" width="800" alt="LendLoop in 20 seconds: browse tools with their availability, book free days on the calendar, arrange the pick-up in messages" />
 
 
 # LendLoop
