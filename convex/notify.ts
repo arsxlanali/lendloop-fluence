@@ -216,3 +216,18 @@ export const dismissRuns = mutation({
     return open.length;
   },
 });
+
+// A free-plan n8n host sleeps after a quiet spell, and a sleeping n8n misses its own schedule
+// (the daily overdue reminders). A light health check every 10 minutes keeps it awake.
+export const keepAutomationAwake = internalAction({
+  args: {},
+  handler: async () => {
+    const url = process.env.N8N_WEBHOOK_URL;
+    if (!url) return;
+    try {
+      await fetch(new URL("/healthz", url), { signal: AbortSignal.timeout(20_000) });
+    } catch {
+      // A missed check only means n8n may sleep until the next one; deliveries retry on their own.
+    }
+  },
+});

@@ -10,3 +10,5 @@ coverage/
 
 # Launch video output (upload brag.mp4 to GitHub by drag-and-drop)
 /brag-output/
+.DS_Store
+.vercel

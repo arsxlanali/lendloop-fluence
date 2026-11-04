@@ -1,0 +1,11 @@
+# Never upload local secrets or local-only work; Vercel gets its keys from project settings.
+.env*
+!.env.example
+brag-output
+.taste-skill
+.agents
+.claude
+.n8n
+docs
+tests
+*.log

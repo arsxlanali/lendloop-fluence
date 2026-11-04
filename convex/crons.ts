@@ -5,5 +5,6 @@ const crons = cronJobs();
 
 crons.interval("recover notification deliveries", { minutes: 1 }, internal.notify.recover, {});
 crons.interval("expire stale requests", { hours: 1 }, internal.loans.expireStale, {});
+crons.interval("keep automation awake", { minutes: 10 }, internal.notify.keepAutomationAwake, {});
 
 export default crons;

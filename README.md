@@ -8,6 +8,9 @@ Borrow what you need. Lend what you don't.
 A neighborhood tool-lending board: neighbors list tools, request them for dates, approve or
 decline requests and close loans, while n8n sends notifications and overdue reminders.
 
+**Live:** https://lendloop-fluence.vercel.app (sign up with your email; a few sample tools are
+already listed). How it's hosted: [Live deployment](#live-deployment).
+
 **Stack:** Next.js 16 (App Router) · TypeScript · Clerk · Convex · n8n 2.46
 
 Notifications use the brief's "logged mock" option: n8n writes each message (with the address
@@ -17,10 +20,12 @@ masked) to its log instead of sending it. Replacing the mock with an email node 
 
 - [Run it locally](#run-it-locally)
 - [Environment variables](#environment-variables)
+- [Live deployment](#live-deployment)
 - [Architecture](#architecture)
 - [Roles and rules](#roles-and-rules)
 - [n8n integration](#n8n-integration)
 - [Security and data minimization](#security-and-data-minimization)
+- [UX, accessibility and performance](#ux-accessibility-and-performance)
 - [Testing](#testing)
 - [Before production](#before-production)
 
@@ -83,6 +88,51 @@ Requires Node.js 22+, Docker, a Clerk account and a Convex account.
 
 `.env*` (except `.env.example`) and `.secrets/` are git-ignored. The shared key exists in two
 places only: the Convex deployment and the encrypted n8n credential.
+
+## Live deployment
+
+| Piece | Where | Notes |
+|---|---|---|
+| Website | Vercel, project `lendloop` | https://lendloop-fluence.vercel.app |
+| Backend and data | Convex production deployment | Same code as local; its own environment variables |
+| Sign-in | Clerk (development instance) | Shows a "Development mode" badge; a production instance needs a domain you own |
+| n8n | Render free web service, image `n8nio/n8n:2.46.5`, Ohio | Same version and settings as `compose.yaml` |
+| n8n's own database | Neon Postgres (free plan), `us-east-2` | Render's free disk is wiped on restart, so n8n keeps workflows and credentials here |
+
+**Secrets stay where they belong.** Vercel holds the Clerk keys (the secret one marked sensitive);
+Convex holds `AUTOMATION_SECRET`, generated for production and never reused from local. On Render,
+the database password and `N8N_ENCRYPTION_KEY` are **secret files** (`DB_POSTGRESDB_PASSWORD_FILE`,
+`N8N_ENCRYPTION_KEY_FILE`), not environment variables, because workflow expressions can read the
+environment (`N8N_BLOCK_ENV_ACCESS_IN_NODE=false`, needed for `CONVEX_SITE_URL`). `.vercelignore`
+keeps `.env*` and local-only folders out of uploads.
+
+**Free-plan sleep.** Render stops a free service after 15 idle minutes, and a sleeping n8n would
+miss its 09:00 UTC reminder run. A Convex cron (`keep automation awake`) calls n8n's `/healthz`
+every 10 minutes; a missed call only delays things, since notification deliveries retry anyway.
+
+**Notifications** are logged mocks here too: Render → `lendloop-n8n` → Logs, search
+`lendloop.notification`. Each line has the event ID, the masked address and the subject.
+
+**Setting up n8n on a new host.** Create the *JWT Auth* credential "LendLoop automation JWT"
+(passphrase = the Convex `AUTOMATION_SECRET`, HS256), import `n8n/*.json`, pick that credential in
+the JWT nodes, set "Report automation failures" as the error workflow of the other two, and
+activate those two. (Importing through the public API assigns new IDs, so the `LLjwtCredential1` and
+`LLautomationErr1` references must be rewritten to the new ones.) Then point Convex at it:
+`npx convex env set --prod N8N_WEBHOOK_URL https://<n8n host>/webhook/lendloop-events`.
+
+**Sample data** for an empty deployment (internal function, so no browser can call it; it does
+nothing if that user already lists tools):
+
+```sh
+npx convex run --prod seed:demo '{"owner": "user_...", "name": "Sam"}'
+```
+
+**Redeploying**
+
+```sh
+npx convex deploy            # backend functions, schema and crons
+npx vercel deploy --prod     # website
+```
 
 ## Architecture
 
@@ -201,7 +251,8 @@ name and the dates. No descriptions, no IDs of other people, nothing about the o
 
 - If any reminder failed today, the run itself fails. Both workflows name an error workflow that posts
   a signed failure report to Convex, and admins see it on `/board/admin`.
-- Notifications that exhaust their retries appear there too, with a **Retry** button.
+- Notifications that exhaust their retries appear there too, grouped by cause, with **Retry all**
+  and **Dismiss**.
 - Each loan shows its latest automation activity ("Overdue reminder sent 2 days ago",
   "Notification failed") and a full recent timeline.
 
@@ -290,7 +341,8 @@ CI (`.github/workflows/check.yml`) runs tests, typecheck and build on every push
 
 - **Real notifications:** replace the mock Code nodes with an email or Slack node using the
   provided idempotency keys, and record consent for the channel.
-- **n8n hardening:** queue mode with Postgres, external task runners, SSO for the editor, the
+- **Clerk production instance** on a domain you own (removes the development badge and limits).
+- **n8n hardening:** a paid always-on instance in queue mode, external task runners, SSO for the editor, the
   webhook behind a reverse proxy with rate limits, and the credential rotated on a schedule
   (accepting two keys in Convex during rotation).
 - **Roles:** Clerk organizations or roles with a permission table instead of an ID list.
