@@ -1,0 +1,87 @@
+{
+  "name": "LendLoop - Signed request notifications",
+  "active": false,
+  "nodes": [
+    {
+      "id": "request-webhook",
+      "name": "Request webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lendloop-events",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "lendloop-events"
+    },
+    {
+      "id": "verify-and-log-mock",
+      "name": "Verify and log mock",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst envelope = $input.first().json.body;\nconst secret = $env.AUTOMATION_SECRET;\nif (!secret || secret.length < 32) throw new Error('Missing automation configuration');\nif (!envelope || typeof envelope.payload !== 'string' || envelope.payload.length > 4096 || !Number.isSafeInteger(envelope.timestamp) || Math.abs(Date.now()-envelope.timestamp)>300000 || !/^[0-9a-f]{64}$/.test(envelope.signature||'')) throw new Error('Invalid signature envelope');\nconst expected=crypto.createHmac('sha256',secret).update(`${envelope.timestamp}\\n${envelope.payload}`).digest();\nif(!crypto.timingSafeEqual(expected,Buffer.from(envelope.signature,'hex')))throw new Error('Invalid signature');\nconst event=JSON.parse(envelope.payload);\nif(!['requested','approved','declined','returned'].includes(event.kind)||typeof event.eventId!=='string'||typeof event.loanId!=='string'||typeof event.recipient!=='string')throw new Error('Invalid event');\n// Deliberately a logged mock notification, as permitted by the assignment.\n// A real provider must use eventId as its idempotency key; transport is at-least-once.\nconsole.log('lendloop.notification.mock',{eventId:event.eventId,loanId:event.loanId,recipient:event.recipient,kind:event.kind});\nreturn [{json:{accepted:true,eventId:event.eventId}}];"
+      }
+    },
+    {
+      "id": "acknowledge",
+      "name": "Acknowledge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Request webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify and log mock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify and log mock": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "executionTimeout": 60
+  },
+  "pinData": {},
+  "meta": {
+    "description": "LendLoop take-home; logged mock notifications; no secrets in export."
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "name": "LendLoop - Daily overdue reminders",
+  "active": false,
+  "nodes": [
+    {
+      "id": "every-day-at-09-utc",
+      "name": "Every day at 09 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sign-overdue-read",
+      "name": "Sign overdue read",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const crypto=require('crypto');const secret=$env.AUTOMATION_SECRET;const site=$env.CONVEX_SITE_URL;\nif(!secret||secret.length<32||!site)throw new Error('Missing automation configuration');\nconst timestamp=String(Date.now());const signature=crypto.createHmac('sha256',secret).update(`${timestamp}\\nGET\\n/overdue\\n`).digest('hex');\nreturn [{json:{url:site.replace(/\\/$/,'')+'/overdue',timestamp,signature}}];"
+      }
+    },
+    {
+      "id": "fetch-overdue",
+      "name": "Fetch overdue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.timestamp }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "log-mock-and-sign-writeback",
+      "name": "Log mock and sign writeback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const crypto=require('crypto');const secret=$env.AUTOMATION_SECRET;const site=$env.CONVEX_SITE_URL;\nconst source=$input.first().json;const loans=source.body??source;if(!Array.isArray(loans))throw new Error('Expected overdue loan array');\nreturn loans.map(loan=>{if(typeof loan.loanId!=='string'||typeof loan.recipient!=='string'||typeof loan.day!=='string')throw new Error('Invalid loan');\nconst key=`reminder:${loan.loanId}:${loan.day}`;\nconsole.log('lendloop.reminder.mock',{idempotencyKey:key,loanId:loan.loanId,recipient:loan.recipient});\nconst body=JSON.stringify({loanId:loan.loanId,day:loan.day});const timestamp=String(Date.now());const signature=crypto.createHmac('sha256',secret).update(`${timestamp}\\nPOST\\n/reminders\\n${body}`).digest('hex');\nreturn {json:{url:site.replace(/\\/$/,'')+'/reminders',timestamp,signature,body}};});"
+      }
+    },
+    {
+      "id": "record-reminder",
+      "name": "Record reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.timestamp }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    }
+  ],
+  "connections": {
+    "Every day at 09 UTC": {
+      "main": [
+        [
+          {
+            "node": "Sign overdue read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign overdue read": {
+      "main": [
+        [
+          {
+            "node": "Fetch overdue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch overdue": {
+      "main": [
+        [
+          {
+            "node": "Log mock and sign writeback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log mock and sign writeback": {
+      "main": [
+        [
+          {
+            "node": "Record reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "executionTimeout": 60,
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "meta": {
+    "description": "LendLoop take-home; logged mock notifications; no secrets in export."
+  }
+}

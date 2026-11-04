@@ -1,0 +1,19 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.46.5
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - GENERIC_TIMEZONE=UTC
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?set a random encryption key}
+      - AUTOMATION_SECRET=${AUTOMATION_SECRET:?set a shared secret of at least 32 characters}
+      - CONVEX_SITE_URL=${CONVEX_SITE_URL:?set the Convex HTTP action URL}
+    volumes:
+      - n8n_data:/home/node/.n8n
+volumes:
+  n8n_data:

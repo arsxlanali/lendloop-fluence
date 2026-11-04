@@ -1,0 +1,53 @@
+{
+  "name": "LendLoop - Automation failure visibility",
+  "active": false,
+  "nodes": [
+    {
+      "id": "workflow-failed",
+      "name": "Workflow failed",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "log-failure",
+      "name": "Log failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const e=$input.first().json;console.error('lendloop.workflow.failed',{workflow:e.workflow?.name,execution:e.execution?.id,url:e.execution?.url});return [{json:{alertLogged:true}}];"
+      }
+    }
+  ],
+  "connections": {
+    "Workflow failed": {
+      "main": [
+        [
+          {
+            "node": "Log failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "executionTimeout": 60
+  },
+  "pinData": {},
+  "meta": {
+    "description": "LendLoop take-home; logged mock notifications; no secrets in export."
+  }
+}
