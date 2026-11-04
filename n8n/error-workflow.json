@@ -1,5 +1,6 @@
 {
-  "name": "LendLoop - Automation failure visibility",
+  "id": "LLautomationErr1",
+  "name": "LendLoop - Report automation failures",
   "active": false,
   "nodes": [
     {
@@ -14,8 +15,8 @@
       "parameters": {}
     },
     {
-      "id": "log-failure",
-      "name": "Log failure",
+      "id": "build-failure-report",
+      "name": "Build failure report",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -23,8 +24,80 @@
         0
       ],
       "parameters": {
-        "jsCode": "const e=$input.first().json;console.error('lendloop.workflow.failed',{workflow:e.workflow?.name,execution:e.execution?.id,url:e.execution?.url});return [{json:{alertLogged:true}}];"
+        "jsCode": "const e = $input.first().json;\nconst report = {\n  executionId: String(e.execution?.id ?? `trigger-${e.trigger?.error?.timestamp ?? Date.now()}`),\n  workflow: String(e.workflow?.name ?? \"unknown workflow\"),\n  node: String(e.execution?.lastNodeExecuted ?? e.trigger?.node?.name ?? \"trigger\"),\n  message: String(e.execution?.error?.message ?? e.trigger?.error?.message ?? \"Unknown error\").slice(0, 300),\n};\nconsole.error(\"lendloop.workflow.failed\", report);\nreturn [{ json: { path: \"/automation/failures\", body: JSON.stringify(report) } }];"
       }
+    },
+    {
+      "id": "hash-failure-body",
+      "name": "Hash failure body",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "value": "={{ $json.body }}",
+        "dataPropertyName": "bodySha256",
+        "encoding": "hex"
+      }
+    },
+    {
+      "id": "sign-failure-request",
+      "name": "Sign failure request",
+      "type": "n8n-nodes-base.jwt",
+      "typeVersion": 1,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "operation": "sign",
+        "useJson": true,
+        "claimsJson": "={{ JSON.stringify({ iss: 'lendloop-n8n', aud: 'lendloop-convex', exp: Math.floor(Date.now() / 1000) + 300, method: 'POST', path: $json.path, body_sha256: $json.bodySha256 }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "jwtAuth": {
+          "id": "LLjwtCredential1",
+          "name": "LendLoop automation JWT"
+        }
+      }
+    },
+    {
+      "id": "send-failure-to-convex",
+      "name": "Send failure to Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CONVEX_SITE_URL.replace(/\\/$/, '') + $('Build failure report').item.json.path }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $('Build failure report').item.json.body }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     }
   ],
   "connections": {
@@ -32,7 +105,40 @@
       "main": [
         [
           {
-            "node": "Log failure",
+            "node": "Build failure report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build failure report": {
+      "main": [
+        [
+          {
+            "node": "Hash failure body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash failure body": {
+      "main": [
+        [
+          {
+            "node": "Sign failure request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign failure request": {
+      "main": [
+        [
+          {
+            "node": "Send failure to Convex",
             "type": "main",
             "index": 0
           }
@@ -44,10 +150,12 @@
     "executionOrder": "v1",
     "saveDataErrorExecution": "all",
     "saveDataSuccessExecution": "none",
-    "executionTimeout": 60
+    "saveManualExecutions": true,
+    "executionTimeout": 120,
+    "timezone": "UTC"
   },
   "pinData": {},
   "meta": {
-    "description": "LendLoop take-home; logged mock notifications; no secrets in export."
+    "description": "LendLoop. Notifications are logged mocks. No secrets in this file."
   }
 }

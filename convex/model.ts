@@ -1,0 +1,141 @@
+import type { QueryCtx, MutationCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
+import { internal } from "./_generated/api";
+import type { Actor } from "./access";
+
+export const FALLBACK_NAME = "A neighbor";
+
+export async function profile(ctx: QueryCtx, subject: string) {
+  return await ctx.db
+    .query("users")
+    .withIndex("subject", (q) => q.eq("subject", subject))
+    .unique();
+}
+
+// Copies name and email from the verified Clerk token. Called when the app opens and by every
+// mutation that makes someone a party to a loan, so notifications always have a recipient.
+export async function rememberProfile(ctx: MutationCtx) {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return;
+  const name = (identity.name ?? identity.givenName ?? FALLBACK_NAME).trim().slice(0, 80) || FALLBACK_NAME;
+  const email =
+    identity.emailVerified !== false && identity.email ? identity.email.slice(0, 254) : undefined;
+  const row = await profile(ctx, identity.subject);
+  if (!row) await ctx.db.insert("users", { subject: identity.subject, name, email });
+  else if (row.name !== name || row.email !== email) await ctx.db.patch(row._id, { name, email });
+}
+
+// A tool is out while an approved loan has started and is not confirmed returned, including an
+// overdue one. Approved loans never overlap, so the first one by end date (from today) is the
+// only one that can cover today.
+export async function availability(ctx: QueryCtx, toolId: Id<"tools">, today: string) {
+  const overdue = await ctx.db
+    .query("loans")
+    .withIndex("tool", (q) => q.eq("toolId", toolId).eq("status", "approved").lt("end", today))
+    .first();
+  if (overdue) return { available: false, overdue: true, until: overdue.end };
+  const next = await ctx.db
+    .query("loans")
+    .withIndex("tool", (q) => q.eq("toolId", toolId).eq("status", "approved").gte("end", today))
+    .first();
+  if (next && next.start <= today) return { available: false, overdue: false, until: next.end };
+  return { available: true, overdue: false, nextBooked: next?.start };
+}
+
+export async function isTrusted(ctx: QueryCtx, subject: string) {
+  const row = await ctx.db
+    .query("trusted")
+    .withIndex("subject", (q) => q.eq("subject", subject))
+    .unique();
+  return row !== null;
+}
+
+export async function logActivity(
+  ctx: MutationCtx,
+  loanId: Id<"loans">,
+  kind: string,
+  actor: string,
+) {
+  await ctx.db.insert("activity", { loanId, kind, at: Date.now(), actor });
+}
+
+// Records a notification in the outbox, in the same transaction as the change it describes,
+// and adds the change to the loan's timeline. Delivery happens afterwards, with retries.
+export async function notify(
+  ctx: MutationCtx,
+  e: {
+    loanId?: Id<"loans">;
+    toolId?: Id<"tools">;
+    kind: string;
+    recipient: string;
+    actor: string;
+  },
+) {
+  const id = await ctx.db.insert("events", {
+    loanId: e.loanId,
+    toolId: e.toolId,
+    kind: e.kind,
+    recipient: e.recipient,
+    attempts: 0,
+    state: "pending",
+    leaseUntil: 0,
+  });
+  if (e.loanId) await logActivity(ctx, e.loanId, e.kind, e.actor);
+  await ctx.scheduler.runAfter(0, internal.notify.send, { id });
+}
+
+export async function audit(ctx: MutationCtx, actor: string, action: string, target: string) {
+  await ctx.db.insert("audit", { actor, action, target, at: Date.now() });
+}
+
+// What one person may see of a loan. Participants see the other party's name, and their email
+// only while the loan is approved (to arrange hand-over and return). Admins see names only.
+export async function loanView(ctx: QueryCtx, loan: Doc<"loans">, viewer: Actor) {
+  const tool = await ctx.db.get(loan.toolId);
+  const role =
+    loan.owner === viewer.subject ? "owner" : loan.borrower === viewer.subject ? "borrower" : "admin";
+  const nameOf = async (subject: string) => (await profile(ctx, subject))?.name ?? FALLBACK_NAME;
+  let counterpart: { name: string; email?: string } | undefined;
+  if (role !== "admin") {
+    const other = await profile(ctx, role === "owner" ? loan.borrower : loan.owner);
+    counterpart = {
+      name: other?.name ?? FALLBACK_NAME,
+      email: loan.status === "approved" ? other?.email : undefined,
+    };
+  }
+  const activity = await ctx.db
+    .query("activity")
+    .withIndex("loan", (q) => q.eq("loanId", loan._id))
+    .order("desc")
+    .take(6);
+  return {
+    _id: loan._id,
+    toolName: tool?.name ?? "Removed listing",
+    toolRemoved: !tool || tool.deleted,
+    start: loan.start,
+    end: loan.end,
+    status: loan.status,
+    role,
+    counterpart,
+    ownerName: role === "admin" ? await nameOf(loan.owner) : undefined,
+    borrowerName: role === "admin" ? await nameOf(loan.borrower) : undefined,
+    returnReported: loan.returnReportedAt !== undefined,
+    lastReminder: loan.lastReminder,
+    activity: activity.map((a) => ({
+      kind: a.kind,
+      at: a.at,
+      by:
+        a.actor === viewer.subject
+          ? "you"
+          : a.actor === loan.owner
+            ? "owner"
+            : a.actor === loan.borrower
+              ? "borrower"
+              : a.actor === "automation" || a.actor === "system"
+                ? a.actor
+                : "admin",
+    })),
+  };
+}
+
+export type LoanView = Awaited<ReturnType<typeof loanView>>;

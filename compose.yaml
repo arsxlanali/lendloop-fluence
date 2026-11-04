@@ -1,3 +1,8 @@
+# Local n8n for LendLoop. Secrets never go in this file or in n8n's environment:
+# - the shared signing key lives in the n8n credential "LendLoop automation JWT";
+# - n8n's own encryption key is mounted as a file (N8N_ENCRYPTION_KEY_FILE).
+# Workflow expressions may read the environment (for CONVEX_SITE_URL), so only
+# non-secret settings belong in `environment`.
 services:
   n8n:
     image: docker.n8n.io/n8nio/n8n:2.46.5
@@ -8,12 +13,18 @@ services:
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
       - GENERIC_TIMEZONE=UTC
-      - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      - N8N_ENCRYPTION_KEY_FILE=/run/secrets/n8n_encryption_key
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?set a random encryption key}
-      - AUTOMATION_SECRET=${AUTOMATION_SECRET:?set a shared secret of at least 32 characters}
-      - CONVEX_SITE_URL=${CONVEX_SITE_URL:?set the Convex HTTP action URL}
+      # Mock notifications are console.log lines; this sends them to `docker compose logs`.
+      - CODE_ENABLE_STDOUT=true
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - CONVEX_SITE_URL=${CONVEX_SITE_URL:?set the Convex HTTP actions URL (ends in .convex.site)}
+    secrets:
+      - n8n_encryption_key
     volumes:
       - n8n_data:/home/node/.n8n
+secrets:
+  n8n_encryption_key:
+    file: ./.secrets/n8n_encryption_key
 volumes:
   n8n_data:

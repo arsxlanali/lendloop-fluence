@@ -1,12 +1,13 @@
 {
-  "name": "LendLoop - Signed request notifications",
+  "id": "LLnotifyEvents01",
+  "name": "LendLoop - Request notifications",
   "active": false,
   "nodes": [
     {
       "id": "request-webhook",
       "name": "Request webhook",
       "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2,
+      "typeVersion": 2.1,
       "position": [
         0,
         0
@@ -14,22 +15,59 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "lendloop-events",
+        "authentication": "jwtAuth",
         "responseMode": "responseNode",
         "options": {}
       },
-      "webhookId": "lendloop-events"
+      "webhookId": "5f0c3a8e-6b1d-4c55-9a59-3e0f3f2f7a11",
+      "credentials": {
+        "jwtAuth": {
+          "id": "LLjwtCredential1",
+          "name": "LendLoop automation JWT"
+        }
+      }
     },
     {
-      "id": "verify-and-log-mock",
-      "name": "Verify and log mock",
-      "type": "n8n-nodes-base.code",
+      "id": "hash-payload",
+      "name": "Hash payload",
+      "type": "n8n-nodes-base.crypto",
       "typeVersion": 2,
       "position": [
-        260,
+        240,
         0
       ],
       "parameters": {
-        "jsCode": "const crypto = require('crypto');\nconst envelope = $input.first().json.body;\nconst secret = $env.AUTOMATION_SECRET;\nif (!secret || secret.length < 32) throw new Error('Missing automation configuration');\nif (!envelope || typeof envelope.payload !== 'string' || envelope.payload.length > 4096 || !Number.isSafeInteger(envelope.timestamp) || Math.abs(Date.now()-envelope.timestamp)>300000 || !/^[0-9a-f]{64}$/.test(envelope.signature||'')) throw new Error('Invalid signature envelope');\nconst expected=crypto.createHmac('sha256',secret).update(`${envelope.timestamp}\\n${envelope.payload}`).digest();\nif(!crypto.timingSafeEqual(expected,Buffer.from(envelope.signature,'hex')))throw new Error('Invalid signature');\nconst event=JSON.parse(envelope.payload);\nif(!['requested','approved','declined','returned'].includes(event.kind)||typeof event.eventId!=='string'||typeof event.loanId!=='string'||typeof event.recipient!=='string')throw new Error('Invalid event');\n// Deliberately a logged mock notification, as permitted by the assignment.\n// A real provider must use eventId as its idempotency key; transport is at-least-once.\nconsole.log('lendloop.notification.mock',{eventId:event.eventId,loanId:event.loanId,recipient:event.recipient,kind:event.kind});\nreturn [{json:{accepted:true,eventId:event.eventId}}];"
+        "action": "hash",
+        "type": "SHA256",
+        "value": "={{ $json.body.payload }}",
+        "dataPropertyName": "payloadSha256",
+        "encoding": "hex"
+      }
+    },
+    {
+      "id": "check-event",
+      "name": "Check event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// The Webhook node already verified the JWT signature and expiry with the credential.\nconst item = $input.first().json;\nconst claims = item.jwtPayload ?? {};\nconst now = Math.floor(Date.now() / 1000);\nif (\n  claims.iss !== \"lendloop-convex\" ||\n  claims.aud !== \"lendloop-n8n\" ||\n  typeof claims.iat !== \"number\" ||\n  typeof claims.exp !== \"number\" ||\n  claims.exp <= now ||\n  claims.exp - claims.iat > 300\n)\n  throw new Error(\"Token claims rejected\");\nconst payload = item.body?.payload;\nif (typeof payload !== \"string\" || payload.length > 4096 || claims.body_sha256 !== item.payloadSha256)\n  throw new Error(\"Payload does not match its signature\");\nconst event = JSON.parse(payload);\nconst kinds = [\"requested\", \"approved\", \"declined\", \"cancelled\", \"expired\", \"return_reported\", \"returned\", \"listing_removed\"];\nif (!kinds.includes(event.kind) || event.eventId !== claims.jti || typeof event.recipient?.name !== \"string\")\n  throw new Error(\"Unexpected event\");\nreturn [{ json: { event } }];"
+      }
+    },
+    {
+      "id": "send-notification-mock-",
+      "name": "Send notification (mock)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const { event } = $input.first().json;\n// Delivery is at-least-once: Convex retries until it gets a 200. Remember recent event IDs so\n// a retry after a lost response doesn't notify twice. (Saved for production executions.)\nconst memory = $getWorkflowStaticData(\"global\");\nmemory.sent = memory.sent ?? {};\nconst now = Date.now();\nfor (const [id, at] of Object.entries(memory.sent)) if (now - at > 2 * 86400000) delete memory.sent[id];\nif (memory.sent[event.eventId]) return [{ json: { accepted: true, duplicate: true } }];\nconst dates = event.loan ? ` (${event.loan.start} to ${event.loan.end})` : \"\";\nconst subjects = {\n  requested: `New request to borrow your ${event.tool.name}${dates}`,\n  approved: `Your request for the ${event.tool.name} was approved${dates}`,\n  declined: `Your request for the ${event.tool.name} was declined`,\n  cancelled: `A request for your ${event.tool.name} was cancelled`,\n  expired: `Your request for the ${event.tool.name} expired`,\n  return_reported: `The borrower says your ${event.tool.name} is back: please confirm`,\n  returned: `Return of the ${event.tool.name} confirmed. Thanks!`,\n  listing_removed: `An admin removed your listing \"${event.tool.name}\"`,\n};\nconst email = event.recipient.email;\n// Mock delivery: a real email/Slack node goes here and gets event.eventId as its idempotency key.\n// The log masks the address; no other personal data is written.\nconsole.log(\"lendloop.notification.mock\", {\n  eventId: event.eventId,\n  to: email ? email.replace(/^(.).*@/, \"$1***@\") : \"(no email on file)\",\n  subject: subjects[event.kind],\n});\nmemory.sent[event.eventId] = now;\nreturn [{ json: { accepted: true } }];"
       }
     },
     {
@@ -38,7 +76,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
       "position": [
-        520,
+        960,
         0
       ],
       "parameters": {
@@ -55,14 +93,36 @@
       "main": [
         [
           {
-            "node": "Verify and log mock",
+            "node": "Hash payload",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Verify and log mock": {
+    "Hash payload": {
+      "main": [
+        [
+          {
+            "node": "Check event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check event": {
+      "main": [
+        [
+          {
+            "node": "Send notification (mock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send notification (mock)": {
       "main": [
         [
           {
@@ -78,10 +138,13 @@
     "executionOrder": "v1",
     "saveDataErrorExecution": "all",
     "saveDataSuccessExecution": "none",
-    "executionTimeout": 60
+    "saveManualExecutions": true,
+    "executionTimeout": 120,
+    "timezone": "UTC",
+    "errorWorkflow": "LLautomationErr1"
   },
   "pinData": {},
   "meta": {
-    "description": "LendLoop take-home; logged mock notifications; no secrets in export."
+    "description": "LendLoop. Notifications are logged mocks. No secrets in this file."
   }
 }

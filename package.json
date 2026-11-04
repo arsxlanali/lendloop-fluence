@@ -8,7 +8,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "convex": "convex dev"
+    "convex": "convex dev",
+    "workflows": "node scripts/build-workflows.mjs"
   },
   "dependencies": {
     "@clerk/nextjs": "7.9.24",
@@ -25,5 +26,8 @@
     "vitest": "5.1.0",
     "convex-test": "0.0.67"
   },
-  "type": "module"
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  }
 }
