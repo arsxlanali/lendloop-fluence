@@ -69,6 +69,8 @@ export async function notify(
     kind: string;
     recipient: string;
     actor: string;
+    // false: send the notification without adding a line to the loan's history (messages).
+    timeline?: boolean;
   },
 ) {
   const id = await ctx.db.insert("events", {
@@ -80,8 +82,35 @@ export async function notify(
     state: "pending",
     leaseUntil: 0,
   });
-  if (e.loanId) await logActivity(ctx, e.loanId, e.kind, e.actor);
+  if (e.loanId && e.timeline !== false) await logActivity(ctx, e.loanId, e.kind, e.actor);
   await ctx.scheduler.runAfter(0, internal.notify.send, { id });
+}
+
+export const readAt = (loan: Doc<"loans">, as: "owner" | "borrower") =>
+  (as === "owner" ? loan.ownerReadAt : loan.borrowerReadAt) ?? 0;
+
+// Messages the viewer hasn't read yet on one loan (capped: the badge only needs "a few").
+export async function unreadFor(ctx: QueryCtx, loan: Doc<"loans">, me: Actor) {
+  const as = loan.owner === me.subject ? "owner" : loan.borrower === me.subject ? "borrower" : null;
+  if (!as) return 0;
+  const recent = await ctx.db
+    .query("messages")
+    .withIndex("loan", (q) => q.eq("loanId", loan._id).gt("at", readAt(loan, as)))
+    .take(20);
+  return recent.filter((m) => m.author !== me.subject).length;
+}
+
+// One-line preview of the conversation for the loan card (the request note if nothing newer).
+async function lastMessage(ctx: QueryCtx, loan: Doc<"loans">, me: Actor) {
+  const m = await ctx.db
+    .query("messages")
+    .withIndex("loan", (q) => q.eq("loanId", loan._id))
+    .order("desc")
+    .first();
+  const body = m?.body ?? loan.requestNote;
+  if (!body) return undefined;
+  const mine = m ? m.author === me.subject : loan.borrower === me.subject;
+  return { mine, body: body.length > 140 ? `${body.slice(0, 139)}…` : body };
 }
 
 export async function audit(ctx: MutationCtx, actor: string, action: string, target: string) {
@@ -122,6 +151,8 @@ export async function loanView(ctx: QueryCtx, loan: Doc<"loans">, viewer: Actor,
     // The neighbors' own messages: for the two of them, not for admins.
     requestNote: role === "admin" ? undefined : loan.requestNote,
     handoverNote: role === "admin" ? undefined : loan.handoverNote,
+    unread: role === "admin" ? 0 : await unreadFor(ctx, loan, viewer),
+    lastMessage: role === "admin" ? undefined : await lastMessage(ctx, loan, viewer),
     returnReported: loan.returnReportedAt !== undefined,
     lastReminder: loan.lastReminder,
     activity: activity.map((a) => ({

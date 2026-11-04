@@ -91,7 +91,7 @@ function checkEvent() {
   if (typeof payload !== "string" || payload.length > 4096 || claims.body_sha256 !== item.payloadSha256)
     throw new Error("Payload does not match its signature");
   const event = JSON.parse(payload);
-  const kinds = ["requested", "approved", "declined", "cancelled", "expired", "return_reported", "return_disputed", "returned", "booking_cancelled", "listing_removed"];
+  const kinds = ["requested", "approved", "declined", "cancelled", "expired", "return_reported", "return_disputed", "returned", "booking_cancelled", "listing_removed", "message"];
   if (!kinds.includes(event.kind) || event.eventId !== claims.jti || typeof event.recipient?.name !== "string")
     throw new Error("Unexpected event");
   return [{ json: { event } }];
@@ -115,6 +115,8 @@ function sendNotification() {
     return_reported: `The borrower says your ${event.tool.name} is back: please confirm`,
     return_disputed: `The owner says the ${event.tool.name} isn't back yet`,
     booking_cancelled: `The booking for the ${event.tool.name}${dates} was cancelled`,
+    // Never the message text: the conversation stays in LendLoop.
+    message: `New message about the ${event.tool.name}. Open LendLoop to read and reply.`,
     returned: `Return of the ${event.tool.name} confirmed. Thanks!`,
     listing_removed: `An admin removed your listing "${event.tool.name}"`,
   };

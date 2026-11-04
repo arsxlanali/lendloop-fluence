@@ -49,6 +49,9 @@ export default defineSchema({
     // the loan stays open and the tool unavailable.
     returnReportedAt: v.optional(v.number()),
     lastReminder: v.optional(v.string()),
+    // When each side last read the loan's messages (for unread counts).
+    ownerReadAt: v.optional(v.number()),
+    borrowerReadAt: v.optional(v.number()),
   })
     .index("tool", ["toolId", "status", "end"])
     .index("owner", ["owner"])
@@ -56,6 +59,15 @@ export default defineSchema({
     .index("borrower", ["borrower"])
     .index("borrowerStatus", ["borrower", "status"])
     .index("statusEnd", ["status", "end"]),
+
+  // Conversation between the two people on a loan. Only they can read it; message text never
+  // leaves Convex (notifications only say that there is a new message).
+  messages: defineTable({
+    loanId: v.id("loans"),
+    author: v.string(),
+    body: v.string(),
+    at: v.number(),
+  }).index("loan", ["loanId", "at"]),
 
   trusted: defineTable({
     subject: v.string(),

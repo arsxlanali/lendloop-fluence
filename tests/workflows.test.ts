@@ -59,6 +59,9 @@ test("the receiver checks claims, the payload hash and the event", () => {
   expect(() => run(js, { ...item, jwtPayload: { ...claims, exp: now + 3600 } })).toThrow(/claims/);
   expect(() => run(js, { ...item, jwtPayload: { ...claims, jti: "evt2" } })).toThrow(/Unexpected event/);
   expect(() => run(js, { ...item, jwtPayload: undefined })).toThrow(/claims/);
+  const note = { ...event, kind: "message" };
+  const accepted = run(js, { ...item, body: { payload: JSON.stringify(note) } }).result[0].json.event;
+  expect(accepted.kind).toBe("message");
 });
 
 test("a redelivered event is not notified twice, and the log masks the address", () => {

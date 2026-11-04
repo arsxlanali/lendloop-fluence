@@ -100,7 +100,8 @@ export const browse = query({
   },
 });
 
-// Dates already taken, shown when choosing dates. Ranges only: nothing about who borrows.
+// Dates already taken, shown in the calendar when choosing dates. Ranges only: nothing about who
+// borrows. Bookings can't overlap and requests start at most a year ahead, so 60 is plenty.
 export const bookings = query({
   args: { toolId: v.id("tools"), today: v.string() },
   handler: async (ctx, { toolId, today }) => {
@@ -109,7 +110,7 @@ export const bookings = query({
     const loans = await ctx.db
       .query("loans")
       .withIndex("tool", (q) => q.eq("toolId", toolId).eq("status", "approved").gte("end", today))
-      .take(10);
+      .take(60);
     return loans.map((l) => ({ start: l.start, end: l.end }));
   },
 });

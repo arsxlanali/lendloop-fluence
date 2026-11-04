@@ -447,3 +447,58 @@ describe("notification outbox", () => {
     expect(JSON.stringify(msg)).not.toMatch(/borrower|Private details/);
   });
 });
+
+describe("messages between the two people on a loan", () => {
+  test("only participants read and write; the request note opens the thread", async () => {
+    const s = setup();
+    const tool = await s.owner.mutation(api.tools.saveTool, fields);
+    const loan = await s.borrower.mutation(api.loans.requestLoan, {
+      toolId: tool, start: "2026-11-05", end: "2026-11-07", today: TODAY, note: "For a shelf",
+    });
+    await s.owner.mutation(api.messages.send, { loanId: loan, body: "  Sure, Saturday?  " });
+    const asBorrower = await s.borrower.query(api.messages.list, { loanId: loan });
+    expect(asBorrower).toMatchObject({ open: true, otherName: "OWNER", unread: true });
+    expect(asBorrower.messages.map((m) => [m.mine, m.body])).toEqual([
+      [true, "For a shelf"],
+      [false, "Sure, Saturday?"],
+    ]);
+    for (const outsider of [s.stranger, s.admin]) {
+      await expect(outsider.query(api.messages.list, { loanId: loan })).rejects.toThrow(ConvexError);
+      await expect(outsider.mutation(api.messages.send, { loanId: loan, body: "hi" })).rejects.toThrow(ConvexError);
+    }
+    expect(await message(s.borrower.mutation(api.messages.send, { loanId: loan, body: "   " }))).toMatch(/Message is required/);
+  });
+
+  test("unread counts, read markers and one notification per unread batch", async () => {
+    const s = setup();
+    const { loan } = await listAndRequest(s);
+    for (const body of ["Is it charged?", "And does it have a case?"])
+      await s.borrower.mutation(api.messages.send, { loanId: loan, body });
+    expect(await s.owner.query(api.messages.unreadCounts, {})).toEqual({ incoming: 2, requests: 0 });
+    const [card] = (await s.owner.query(api.loans.incoming, { paginationOpts: page })).page;
+    expect(card).toMatchObject({ unread: 2, lastMessage: { mine: false, body: "And does it have a case?" } });
+    const events = async () => (await s.t.run((ctx) => ctx.db.query("events").collect())).filter((e) => e.kind === "message");
+    expect((await events()).map((e) => e.recipient)).toEqual(["owner"]);
+    await s.owner.mutation(api.messages.markRead, { loanId: loan });
+    expect(await s.owner.query(api.messages.unreadCounts, {})).toEqual({ incoming: 0, requests: 0 });
+    vi.setSystemTime(new Date(`${TODAY}T10:05:00Z`));
+    await s.borrower.mutation(api.messages.send, { loanId: loan, body: "Thanks!" });
+    expect((await events()).map((e) => e.recipient)).toEqual(["owner", "owner"]);
+    // Messages are not loan history, and the text never goes to the webhook.
+    const kinds = (await s.t.run((ctx) => ctx.db.query("activity").collect())).map((a) => a.kind);
+    expect(kinds).not.toContain("message");
+    const payload = await s.t.query(internal.notify.message, { id: (await events())[0]._id });
+    expect(JSON.stringify(payload)).not.toMatch(/charged|case|Thanks/);
+  });
+
+  test("closed once the loan is finished; sending is rate-limited", async () => {
+    const s = setup();
+    const { loan } = await listAndRequest(s);
+    for (let i = 0; i < 10; i++) await s.borrower.mutation(api.messages.send, { loanId: loan, body: `m${i}` });
+    expect(await message(s.borrower.mutation(api.messages.send, { loanId: loan, body: "one more" }))).toMatch(/too quickly/);
+    await s.owner.mutation(api.loans.decide, { id: loan, approve: false, today: TODAY });
+    expect((await s.borrower.query(api.messages.list, { loanId: loan })).open).toBe(false);
+    vi.setSystemTime(new Date(`${TODAY}T10:05:00Z`));
+    expect(await message(s.owner.mutation(api.messages.send, { loanId: loan, body: "hello?" }))).toMatch(/closed/);
+  });
+});

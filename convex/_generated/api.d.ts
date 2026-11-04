@@ -13,6 +13,7 @@ import type * as automation from "../automation.js";
 import type * as crons from "../crons.js";
 import type * as http from "../http.js";
 import type * as loans from "../loans.js";
+import type * as messages from "../messages.js";
 import type * as model from "../model.js";
 import type * as notify from "../notify.js";
 import type * as tools from "../tools.js";
@@ -30,6 +31,7 @@ declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   http: typeof http;
   loans: typeof loans;
+  messages: typeof messages;
   model: typeof model;
   notify: typeof notify;
   tools: typeof tools;

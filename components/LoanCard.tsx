@@ -6,6 +6,7 @@ import { api } from "../convex/_generated/api";
 import { activityLabel, ago, formatRange, isAutomation, loanState } from "./format";
 import { useRunner, useToday } from "./hooks";
 import { ConfirmDialog, Modal, Pill, Skeletons } from "./ui";
+import { Thread } from "./Thread";
 import { LIMITS } from "../lib/policy";
 
 type Dialog = "approve" | "decline" | "cancelRequest" | "cancelBooking" | null;
@@ -69,6 +70,8 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
   const historyId = useId();
   const [dialog, setDialog] = useState<Dialog>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [showMessages, setShowMessages] = useState(false);
+  const messagesId = useId();
   const { busy, error, run } = useRunner();
   const state = loanState(loan, today);
   const started = loan.start <= today;
@@ -99,11 +102,10 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
             </span>
           )}
         </p>
-        {loan.requestNote && (
-          <blockquote>
-            <span>{loan.role === "borrower" ? "Your message" : `${other} wrote`}</span>
-            {loan.requestNote}
-          </blockquote>
+        {loan.lastMessage && !showMessages && (
+          <p className="preview">
+            <span>{loan.lastMessage.mine ? "You" : other}:</span> {loan.lastMessage.body}
+          </p>
         )}
         {loan.handoverNote && (
           <blockquote>
@@ -137,6 +139,24 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
               History<span className="visually-hidden"> of the {loan.toolName} loan</span>
             </button>
           )}
+          {(owner || borrower) && (
+            <button
+              type="button"
+              className={loan.unread ? "history-toggle has-unread" : "history-toggle"}
+              aria-expanded={showMessages}
+              aria-controls={messagesId}
+              onClick={() => setShowMessages((open) => !open)}
+            >
+              <span className="chevron" aria-hidden="true" />
+              Messages<span className="visually-hidden"> with {other}</span>
+              {loan.unread > 0 && (
+                <span className="unread">
+                  {loan.unread}
+                  <span className="visually-hidden"> unread</span>
+                </span>
+              )}
+            </button>
+          )}
           {lastAutomation && (
             <span className="automation">
               {activityLabel(lastAutomation.kind, lastAutomation.by)} {ago(lastAutomation.at)}
@@ -155,6 +175,8 @@ export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?
             ))}
           </ol>
         )}
+        {/* Mounted only while open: a closed card holds no message subscription. */}
+        <div id={messagesId}>{showMessages && <Thread loanId={loan._id} />}</div>
       </div>
       <div className="loan-actions">
         {owner && loan.status === "pending" && (

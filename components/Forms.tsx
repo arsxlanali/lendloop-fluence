@@ -3,10 +3,11 @@ import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
-import { categories, LIMITS, addDays } from "../lib/policy";
+import { categories, LIMITS } from "../lib/policy";
 import { useRunner, useToday } from "./hooks";
 import { Modal } from "./ui";
 import { formatRange } from "./format";
+import { RangeCalendar, type Selection } from "./RangeCalendar";
 
 type Editable = {
   _id: Id<"tools">;
@@ -116,73 +117,66 @@ export function BorrowDialog({
   const request = useMutation(api.loans.requestLoan);
   const today = useToday();
   const booked = useQuery(api.tools.bookings, { toolId: tool._id, today });
-  const [start, setStart] = useState(today);
+  const [dates, setDates] = useState<Selection>({ start: null, end: null });
+  const [note, setNote] = useState("");
   const { busy, error, run } = useRunner();
   return (
-    <Modal title={`Borrow the ${tool.name}`} description="The owner sees your name and your message." onClose={onClose}>
+    <Modal
+      title={`Borrow the ${tool.name}`}
+      description="Pick your dates. Booked days can't be chosen. The owner sees your name and your message."
+      onClose={onClose}
+    >
       <form
         onSubmit={async (e) => {
           e.preventDefault();
-          const f = new FormData(e.currentTarget);
+          if (!dates.start) return;
           const ok = await run(
             "request",
             () =>
-              request({
-                toolId: tool._id,
-                start: String(f.get("start")),
-                end: String(f.get("end")),
-                today,
-                note: String(f.get("note") ?? ""),
-              }),
+              request({ toolId: tool._id, start: dates.start!, end: dates.end ?? dates.start!, today, note }),
             `Request sent for the ${tool.name}. You'll find the answer in My requests.`,
           );
           if (ok) onClose();
         }}
       >
         <FormError error={error} />
-        {booked && booked.length > 0 && (
-          <div className="booked" aria-live="polite">
-            <strong>Already booked:</strong>{" "}
-            {booked.map((b) => formatRange(b.start, b.end)).join(", ")}
-          </div>
+        {booked === undefined ? (
+          <p className="calendar-loading" role="status">
+            Checking availability…
+          </p>
+        ) : (
+          <>
+            {booked.length > 0 && (
+              <p className="booked-note">
+                <strong>Already booked:</strong> {booked.map((b) => formatRange(b.start, b.end)).join(", ")}
+              </p>
+            )}
+            <RangeCalendar
+              today={today}
+              booked={booked}
+              maxDays={LIMITS.maxLoanDays}
+              maxAhead={LIMITS.maxDaysAhead}
+              value={dates}
+              onChange={setDates}
+              autoFocus
+            />
+          </>
         )}
-        <div className="form-row">
-          <label>
-            From
-            <input
-              name="start"
-              type="date"
-              required
-              min={today}
-              max={addDays(today, LIMITS.maxDaysAhead)}
-              value={start}
-              onChange={(e) => setStart(e.target.value)}
-            />
-          </label>
-          <label>
-            Until (included)
-            <input
-              name="end"
-              type="date"
-              required
-              min={start || today}
-              max={addDays(start || today, LIMITS.maxLoanDays - 1)}
-              defaultValue={start}
-            />
-          </label>
-        </div>
         <label>
           Message to the owner (optional)
-          <textarea name="note" maxLength={LIMITS.noteLength} placeholder="What it's for, when you could pick it up" />
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            maxLength={LIMITS.noteLength}
+            placeholder="What it's for, when you could pick it up"
+          />
         </label>
-        <p className="hint">
-          Your email stays private. Loans last up to {LIMITS.maxLoanDays} days.
-        </p>
+        <p className="hint">Your email stays private. Loans last up to {LIMITS.maxLoanDays} days.</p>
         <div className="actions end">
           <button type="button" className="secondary" onClick={onClose}>
             Cancel
           </button>
-          <button disabled={busy !== null}>{busy ? "Sending…" : "Send request"}</button>
+          <button disabled={busy !== null || !dates.start}>{busy ? "Sending…" : "Send request"}</button>
         </div>
       </form>
     </Modal>

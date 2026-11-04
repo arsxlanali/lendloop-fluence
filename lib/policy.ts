@@ -13,6 +13,8 @@ export const LIMITS = {
   conditionLength: 100,
   descriptionLength: 1000,
   noteLength: 500,
+  messageLength: 1000,
+  messagesPerMinute: 10,
   // Abuse controls: one account cannot flood the board or a neighbor's inbox.
   activeListingsPerUser: 50,
   pendingRequestsPerBorrower: 10,

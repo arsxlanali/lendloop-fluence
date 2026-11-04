@@ -11,12 +11,13 @@ function Nav() {
   const path = usePathname();
   const me = useQuery(api.users.me);
   const waiting = useQuery(api.loans.needsAnswer);
+  const unread = useQuery(api.messages.unreadCounts);
   const active = useRef<HTMLAnchorElement>(null);
   const tabs = [
     { href: "/board", label: "Explore" },
     { href: "/board/listings", label: "My listings" },
-    { href: "/board/requests", label: "My requests" },
-    { href: "/board/incoming", label: "Incoming", count: waiting?.length },
+    { href: "/board/requests", label: "My requests", count: unread?.requests },
+    { href: "/board/incoming", label: "Incoming", count: (waiting?.length ?? 0) + (unread?.incoming ?? 0) },
     ...(me?.admin ? [{ href: "/board/admin", label: "Admin" }] : []),
   ];
   // On narrow screens the tab bar scrolls: keep the current tab in view.
@@ -38,7 +39,7 @@ function Nav() {
               {t.count ? (
                 <span className="count">
                   {t.count}
-                  <span className="visually-hidden"> waiting for your answer</span>
+                  <span className="visually-hidden"> need your attention</span>
                 </span>
               ) : null}
             </Link>

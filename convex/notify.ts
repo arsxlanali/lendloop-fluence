@@ -25,7 +25,7 @@ export const claim = internalMutation({
       return null;
     if (e.attempts >= MAX_ATTEMPTS) {
       await ctx.db.patch(id, { state: "failed", error: e.error ?? "Retry budget exhausted" });
-      if (e.loanId) await logActivity(ctx, e.loanId, "notification_failed", "automation");
+      if (e.loanId && e.kind !== "message") await logActivity(ctx, e.loanId, "notification_failed", "automation");
       return null;
     }
     await ctx.db.patch(id, {
@@ -69,12 +69,12 @@ export const settle = internalMutation({
     if (!e || e.state !== "sending" || e.attempts !== a.attempt) return;
     if (a.ok) {
       await ctx.db.patch(a.id, { state: "delivered", error: undefined, leaseUntil: 0 });
-      if (e.loanId) await logActivity(ctx, e.loanId, "notification_sent", "automation");
+      if (e.loanId && e.kind !== "message") await logActivity(ctx, e.loanId, "notification_sent", "automation");
       return;
     }
     if (a.attempt >= MAX_ATTEMPTS) {
       await ctx.db.patch(a.id, { state: "failed", error: a.error, leaseUntil: 0 });
-      if (e.loanId) await logActivity(ctx, e.loanId, "notification_failed", "automation");
+      if (e.loanId && e.kind !== "message") await logActivity(ctx, e.loanId, "notification_failed", "automation");
       return;
     }
     const wait = backoff(a.attempt);
