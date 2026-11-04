@@ -1,3 +1,5 @@
+https://github.com/user-attachments/assets/4e6a2448-1be4-4c90-a87c-f9fe8ff2174f
+
 # LendLoop
 
 Borrow what you need. Lend what you don't.
