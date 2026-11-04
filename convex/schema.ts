@@ -11,9 +11,8 @@ export const loanStatus = v.union(
 );
 
 export default defineSchema({
-  // The minimum needed for two neighbors to arrange a hand-over. Copied from the verified
-  // Clerk token, never from client arguments. The email is shown only to the other party of an
-  // approved loan and to the notification workflow.
+  // Name shown to the other party of a loan; email used only to send notifications, never
+  // shown to other users. Copied from the verified Clerk token, never from client arguments.
   users: defineTable({
     subject: v.string(),
     name: v.string(),
@@ -32,7 +31,8 @@ export default defineSchema({
   })
     .index("active", ["deleted"])
     .index("category", ["deleted", "category"])
-    .index("owner", ["owner", "deleted"]),
+    .index("owner", ["owner", "deleted"])
+    .searchIndex("search", { searchField: "name", filterFields: ["deleted", "category"] }),
 
   loans: defineTable({
     toolId: v.id("tools"),
@@ -41,7 +41,12 @@ export default defineSchema({
     start: v.string(),
     end: v.string(),
     status: loanStatus,
-    // The borrower says the tool is back; the owner confirms. Until then the loan stays open.
+    // Optional messages between the two neighbors, written by them and shown only to them:
+    // contact details are shared only if a user chooses to write them here.
+    requestNote: v.optional(v.string()),
+    handoverNote: v.optional(v.string()),
+    // The borrower says the tool is back; the owner confirms (or says it isn't). Until then
+    // the loan stays open and the tool unavailable.
     returnReportedAt: v.optional(v.number()),
     lastReminder: v.optional(v.string()),
   })
@@ -100,7 +105,9 @@ export default defineSchema({
     leaseUntil: v.number(),
     attempts: v.number(),
     error: v.optional(v.string()),
-  }).index("loanDay", ["loanId", "day"]),
+  })
+    .index("loanDay", ["loanId", "day"])
+    .index("dayState", ["day", "state"]),
 
   // Failed n8n executions reported by the error workflow, shown to admins in the app.
   automationFailures: defineTable({

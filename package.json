@@ -9,11 +9,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "convex": "convex dev",
-    "workflows": "node scripts/build-workflows.mjs"
+    "workflows": "node scripts/build-workflows.mjs",
+    "relay": "node scripts/webhook-relay.mjs"
   },
   "dependencies": {
     "@clerk/nextjs": "7.9.24",
     "convex": "1.49.0",
+    "jose": "6.2.15",
     "next": "16.4.5",
     "react": "19.3.1",
     "react-dom": "19.3.1"
@@ -22,9 +24,9 @@
     "@types/node": "26.6.6",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "convex-test": "0.0.67",
     "typescript": "7.0.2",
-    "vitest": "5.1.0",
-    "convex-test": "0.0.67"
+    "vitest": "5.1.0"
   },
   "type": "module",
   "engines": {

@@ -9,7 +9,7 @@ const body = DM_Sans({ subsets: ["latin"], variable: "--font-body" });
 const display = Manrope({ subsets: ["latin"], variable: "--font-display" });
 
 export const metadata: Metadata = {
-  title: "LendLoop | Borrow what you need. Lend what you don't.",
+  title: { default: "LendLoop · Borrow what you need. Lend what you don't.", template: "%s · LendLoop" },
   description: "A neighborhood tool-lending board.",
 };
 
@@ -24,7 +24,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <Providers>{children}</Providers>
           </ClerkProvider>
         ) : (
-          <main className="setup">
+          <main className="container setup">
             <p className="eyebrow">LendLoop · setup needed</p>
             <h1>
               Good neighbors.

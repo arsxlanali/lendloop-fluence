@@ -4,8 +4,8 @@
   "active": false,
   "nodes": [
     {
-      "id": "hourly-09-17-utc",
-      "name": "Hourly 09-17 UTC",
+      "id": "daily-09-00-utc",
+      "name": "Daily 09:00 UTC",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [
@@ -17,7 +17,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 9-17 * * *"
+              "expression": "0 9 * * *"
             }
           ]
         }
@@ -33,7 +33,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "return [{ json: { path: \"/automation/reminders/claim\", body: JSON.stringify({ limit: 100 }) } }];"
+        "jsCode": "return [{ json: { path: \"/automation/reminders/claim\", body: \"{}\" } }];"
       }
     },
     {
@@ -118,7 +118,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const response = $input.first().json;\nif (!Array.isArray(response.reminders)) throw new Error(\"Unexpected claim response\");\nconst results = [];\nfor (const r of response.reminders) {\n  try {\n    if (!r.recipient?.email) throw new Error(\"No email address on file\");\n    const subject =\n      r.kind === \"confirm_return\"\n        ? `Please confirm the return of your ${r.tool.name}`\n        : `Reminder: the ${r.tool.name} was due back on ${r.dueDate}`;\n    // Mock delivery: a real email/Slack node goes here with r.idempotencyKey as its idempotency key.\n    console.log(\"lendloop.reminder.mock\", {\n      key: r.idempotencyKey,\n      to: r.recipient.email.replace(/^(.).*@/, \"$1***@\"),\n      subject,\n    });\n    results.push({ loanId: r.loanId, day: r.day, status: \"sent\" });\n  } catch (error) {\n    results.push({ loanId: r.loanId, day: r.day, status: \"failed\", error: String(error.message).slice(0, 200) });\n  }\n}\nreturn [\n  {\n    json: {\n      path: \"/automation/reminders/report\",\n      body: JSON.stringify({ results }),\n      sent: results.filter((r) => r.status === \"sent\").length,\n      failed: results.filter((r) => r.status === \"failed\").length,\n    },\n  },\n];"
+        "jsCode": "const response = $input.first().json;\nif (!Array.isArray(response.reminders)) throw new Error(\"Unexpected claim response\");\nconst results = [];\nfor (const r of response.reminders) {\n  try {\n    if (!r.recipient?.email) throw new Error(\"No email address on file\");\n    const subject = `Reminder: the ${r.tool.name} was due back on ${r.dueDate}`;\n    // Mock delivery: a real email/Slack node goes here with r.idempotencyKey as its idempotency key.\n    console.log(\"lendloop.reminder.mock\", {\n      key: r.idempotencyKey,\n      to: r.recipient.email.replace(/^(.).*@/, \"$1***@\"),\n      subject,\n    });\n    results.push({ loanId: r.loanId, day: r.day, status: \"sent\" });\n  } catch (error) {\n    results.push({ loanId: r.loanId, day: r.day, status: \"failed\", error: String(error.message).slice(0, 200) });\n  }\n}\nreturn [\n  {\n    json: {\n      path: \"/automation/reminders/report\",\n      body: JSON.stringify({ results }),\n      sent: results.filter((r) => r.status === \"sent\").length,\n      failed: results.filter((r) => r.status === \"failed\").length,\n    },\n  },\n];"
       }
     },
     {
@@ -194,21 +194,41 @@
       "waitBetweenTries": 5000
     },
     {
-      "id": "fail-run-if-any-reminder-failed",
-      "name": "Fail run if any reminder failed",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "id": "more-overdue-loans-",
+      "name": "More overdue loans?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
       "position": [
         2160,
         0
       ],
       "parameters": {
-        "jsCode": "const { sent, failed } = $(\"Send reminders (mock)\").first().json;\n// Failed reminders are recorded in Convex and retried on the next hourly run. Failing this\n// execution as well hands it to the error workflow, so an admin sees it in the app.\nif (failed > 0) throw new Error(`${failed} reminder(s) failed, ${sent} sent`);\nreturn [{ json: { sent, failed } }];"
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.more === true && $runIndex < 49 }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "finish",
+      "name": "Finish",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const { more, failedToday } = $input.first().json;\n// Failed reminders are recorded in Convex (and shown on each loan). Failing the execution\n// as well hands it to the error workflow, so an admin sees it in the app.\nif (more) throw new Error(\"Stopped after 50 batches with overdue loans left; run again to continue\");\nif (failedToday > 0) throw new Error(`${failedToday} reminder(s) failed today; see the admin page`);\nreturn [{ json: { failedToday } }];"
       }
     }
   ],
   "connections": {
-    "Hourly 09-17 UTC": {
+    "Daily 09:00 UTC": {
       "main": [
         [
           {
@@ -300,7 +320,25 @@
       "main": [
         [
           {
-            "node": "Fail run if any reminder failed",
+            "node": "More overdue loans?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "More overdue loans?": {
+      "main": [
+        [
+          {
+            "node": "Claim request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish",
             "type": "main",
             "index": 0
           }

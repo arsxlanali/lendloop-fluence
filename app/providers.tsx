@@ -3,13 +3,15 @@ import { ConvexReactClient } from "convex/react";
 import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { useAuth } from "@clerk/nextjs";
 import { useState } from "react";
+import { TodayProvider, ToastProvider } from "../components/hooks";
+
 export function Providers({ children }: { children: React.ReactNode }) {
-  const [client] = useState(
-    () => new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL!),
-  );
+  const [client] = useState(() => new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL!));
   return (
     <ConvexProviderWithClerk client={client} useAuth={useAuth}>
-      {children}
+      <TodayProvider>
+        <ToastProvider>{children}</ToastProvider>
+      </TodayProvider>
     </ConvexProviderWithClerk>
   );
 }

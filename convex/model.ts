@@ -88,21 +88,21 @@ export async function audit(ctx: MutationCtx, actor: string, action: string, tar
   await ctx.db.insert("audit", { actor, action, target, at: Date.now() });
 }
 
-// What one person may see of a loan. Participants see the other party's name, and their email
-// only while the loan is approved (to arrange hand-over and return). Admins see names only.
-export async function loanView(ctx: QueryCtx, loan: Doc<"loans">, viewer: Actor) {
+// What one person may see of a loan. Participants see the other party's name and the notes they
+// wrote each other; nobody sees anyone's email. Admins see both names, without the notes.
+// With asAdmin, the oversight view: names only, even on the admin's own loans.
+export async function loanView(ctx: QueryCtx, loan: Doc<"loans">, viewer: Actor, asAdmin = false) {
   const tool = await ctx.db.get(loan.toolId);
-  const role =
-    loan.owner === viewer.subject ? "owner" : loan.borrower === viewer.subject ? "borrower" : "admin";
+  const role = asAdmin
+    ? "admin"
+    : loan.owner === viewer.subject
+      ? "owner"
+      : loan.borrower === viewer.subject
+        ? "borrower"
+        : "admin";
   const nameOf = async (subject: string) => (await profile(ctx, subject))?.name ?? FALLBACK_NAME;
-  let counterpart: { name: string; email?: string } | undefined;
-  if (role !== "admin") {
-    const other = await profile(ctx, role === "owner" ? loan.borrower : loan.owner);
-    counterpart = {
-      name: other?.name ?? FALLBACK_NAME,
-      email: loan.status === "approved" ? other?.email : undefined,
-    };
-  }
+  const counterpart =
+    role === "admin" ? undefined : { name: await nameOf(role === "owner" ? loan.borrower : loan.owner) };
   const activity = await ctx.db
     .query("activity")
     .withIndex("loan", (q) => q.eq("loanId", loan._id))
@@ -119,6 +119,9 @@ export async function loanView(ctx: QueryCtx, loan: Doc<"loans">, viewer: Actor)
     counterpart,
     ownerName: role === "admin" ? await nameOf(loan.owner) : undefined,
     borrowerName: role === "admin" ? await nameOf(loan.borrower) : undefined,
+    // The neighbors' own messages: for the two of them, not for admins.
+    requestNote: role === "admin" ? undefined : loan.requestNote,
+    handoverNote: role === "admin" ? undefined : loan.handoverNote,
     returnReported: loan.returnReportedAt !== undefined,
     lastReminder: loan.lastReminder,
     activity: activity.map((a) => ({

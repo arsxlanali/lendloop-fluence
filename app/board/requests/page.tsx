@@ -1,28 +1,31 @@
 "use client";
-import { usePaginatedQuery } from "convex/react";
+import Link from "next/link";
+import { usePaginatedQuery, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
-import { LoadMore, LoanCard } from "../../../components/LoanCard";
+import { LoadMore, LoanSection } from "../../../components/LoanCard";
+import { PageTitle } from "../../../components/ui";
+
+const OPEN = new Set(["pending", "approved"]);
 
 export default function MyRequests() {
-  const { results, status, loadMore } = usePaginatedQuery(api.loans.myRequests, {}, { initialNumItems: 20 });
+  const waiting = useQuery(api.loans.byStatus, { as: "borrower", status: "pending" });
+  const current = useQuery(api.loans.byStatus, { as: "borrower", status: "approved" });
+  const past = usePaginatedQuery(api.loans.myRequests, {}, { initialNumItems: 20 });
   return (
-    <section>
-      <div className="section-heading">
-        <h2>My requests</h2>
-        <span>Things you asked to borrow</span>
-      </div>
-      {status === "LoadingFirstPage" ? (
-        <p className="empty">Loading…</p>
-      ) : results.length === 0 ? (
-        <p className="empty">No requests yet. Find something in Explore.</p>
-      ) : (
-        <div className="loans">
-          {results.map((l) => (
-            <LoanCard key={l._id} loan={l} />
-          ))}
-        </div>
-      )}
-      <LoadMore status={status} loadMore={loadMore} />
-    </section>
+    <>
+      <PageTitle title="My requests">
+        <p className="lede">
+          Things you asked to borrow. <Link href="/board">Find something new</Link>
+        </p>
+      </PageTitle>
+      <LoanSection title="Borrowing now & upcoming" loans={current} empty="Nothing borrowed right now." />
+      <LoanSection title="Waiting for an answer" loans={waiting} empty="No open requests." />
+      <LoanSection
+        title="Past"
+        loans={past.status === "LoadingFirstPage" ? undefined : past.results.filter((l) => !OPEN.has(l.status))}
+        empty="Nothing here yet."
+        footer={<LoadMore status={past.status} loadMore={past.loadMore} />}
+      />
+    </>
   );
 }

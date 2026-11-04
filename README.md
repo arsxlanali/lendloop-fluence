@@ -53,9 +53,14 @@ Requires Node.js 22+, Docker, a Clerk account and a Convex account.
      reminders*, set the error workflow to *LendLoop - Report automation failures*.
    - **Publish** all three workflows.
 
-   Convex runs in the cloud and cannot reach `localhost`. Expose only the webhook path, e.g.
-   `cloudflared tunnel --url http://localhost:5678`, and use that URL in `N8N_WEBHOOK_URL`.
-   Keep the editor private.
+   Convex runs in the cloud and cannot reach `localhost`. Never tunnel n8n's port 5678: that
+   would publish the editor. `npm run relay` starts a small relay on `127.0.0.1:5679` that
+   forwards only `POST /webhook/lendloop-events` and answers 404 to everything else; tunnel that:
+   ```sh
+   npm run relay                                     # terminal 1
+   cloudflared tunnel --url http://127.0.0.1:5679    # terminal 2 (brew install cloudflared)
+   npx convex env set N8N_WEBHOOK_URL https://<name>.trycloudflare.com/webhook/lendloop-events
+   ```
 5. **App:** `npm run dev`, open http://localhost:3000, and sign in with two accounts in two
    browsers: one lists a tool, the other requests it, the first approves.
 
@@ -90,7 +95,7 @@ Browser ── Clerk session ──► Next.js (pages; /board/* protected by Cle
                      │
                      └─ HTTP routes /automation/*  ◄── signed calls from n8n
                             ▲
-n8n schedule (hourly 09–17 UTC): claim overdue loans ─► send (mock) ─► report sent/failed
+n8n schedule (daily 09:00 UTC): claim 100 overdue ─► send (mock) ─► report ─► repeat while more
 n8n error workflow: any failed run ─► POST /automation/failures ─► admin page
 ```
 
@@ -103,7 +108,7 @@ n8n error workflow: any failed run ─► POST /automation/failures ─► admin
 | `convex/notify.ts` | Outbox delivery to n8n, retries, admin failure view and replay |
 | `convex/automation.ts`, `convex/http.ts` | Endpoints n8n calls: reminder claim/report, failure reports |
 | `convex/model.ts`, `convex/access.ts` | Shared helpers: identity, roles, availability, loan views |
-| `lib/policy.ts`, `lib/signing.ts` | Validation rules and limits; JWT signing shared with n8n |
+| `lib/policy.ts`, `lib/signing.ts` | Validation rules and limits; JWT signing shared with n8n (`jose`) |
 | `app/`, `components/` | Pages (`/`, `/board`, `/board/listings`, `/requests`, `/incoming`, `/admin`) |
 | `scripts/build-workflows.mjs` | Source of the n8n workflows; `npm run workflows` regenerates `n8n/*.json` |
 
@@ -113,14 +118,17 @@ n8n error workflow: any failed run ─► POST /automation/failures ─► admin
   and state change is checked again in the mutation, inside a serializable transaction. Two
   owners' tabs approving overlapping requests at once cannot both succeed.
 - **Everything that grows is paginated or bounded by an index:** the board, every loan list and
-  the admin view use `paginate()`; availability, reminder and expiry lookups are index ranges.
+  the admin view use `paginate()`; the public page fills each page with tools free today by
+  walking an index range, so tools on loan never leave it showing an empty page; availability,
+  reminder and expiry lookups are index ranges.
   Queries read only what they show, so a write elsewhere doesn't re-run every open dashboard.
 - **Dates are calendar days in the user's time zone.** The client sends its local date; the
   server accepts it only within a day of UTC, which every real time zone is. This keeps
   availability correct at midnight without time-dependent cached queries.
 - **Loan lifecycle:** `pending → approved | declined | cancelled | expired`, then
   `approved → returned`. Approving declines overlapping requests. Requests whose dates have
-  passed expire hourly. The borrower *reports* a return; only the owner *confirms* it.
+  passed expire hourly. The borrower *reports* a return; only the owner *confirms* it, or says
+  it isn't back yet, which reopens the loan for reminders.
 
 ## Roles and rules
 
@@ -130,8 +138,9 @@ n8n error workflow: any failed run ─► POST /automation/failures ─► admin
 | Browse with descriptions, condition, availability, category filter | | ✓ | ✓ |
 | Create / edit / remove own listings | | ✓ (max 50 active) | ✓ |
 | Request a tool (not their own; ≤ 90 days; ≤ 10 open requests) | | ✓ | ✓ |
-| Cancel own request · report own return | | ✓ | ✓ |
-| Approve / decline · confirm return | | owner of the tool | owner of the tool |
+| Add a message to a request · cancel it · report own return | | ✓ | ✓ |
+| Approve (with optional hand-over details) / decline · confirm or dispute a return (once the loan has started) | | owner of the tool | owner of the tool |
+| Cancel an approved booking before it starts (the other side is told) | | owner or borrower | owner or borrower |
 | Remove any listing (audited, owner notified) | | | ✓ |
 | Mark a lender Trusted (not themselves; audited) | | | ✓ |
 | View all loans · automation failures · retry a failed notification | | | ✓ |
@@ -145,6 +154,8 @@ Clerk roles or organizations with a permission table; the check stays in one fun
 
 **Signing, both directions.** Convex and n8n share one HS256 key. On the n8n side it lives in a
 *JWT Auth* credential (encrypted by n8n), never in workflow JSON, Code nodes or the environment.
+Convex signs and verifies with the `jose` library; n8n's nodes use `jsonwebtoken`. HS256 is
+HMAC-SHA256, the brief's suggested scheme, packaged so n8n can verify it with a stored credential.
 
 - *Convex → n8n:* the body is `{"payload": "<json>"}`. The `Authorization: Bearer` token carries
   `iss`, `aud`, a 5-minute `exp`, `jti` = event ID and the SHA-256 of the payload. n8n's Webhook
@@ -165,15 +176,20 @@ name and the dates. No descriptions, no IDs of other people, nothing about the o
   attempt is ignored), exponential backoff and 6 attempts. A cron restarts expired leases.
   n8n remembers delivered event IDs for two days, so a retry after a lost response doesn't
   notify twice; a real provider gets the event ID as its idempotency key.
-- *Overdue reminders:* n8n first **claims** a batch: Convex leases each loan for 30 minutes and
-  returns the message fields. Then n8n sends and **reports** sent/failed per loan. A sent reminder
-  is never claimed again that day; a failed one is retried on later runs, at most 3 times a day;
-  repeating a report changes nothing. A borrower who reported the return isn't chased: the owner
-  is asked to confirm instead. The idempotency key is `reminder:<loanId>:<day>`.
+- *Overdue reminders (daily, 09:00 UTC):* n8n **claims** a batch of up to 100: Convex leases each
+  loan for 30 minutes and returns the message fields. n8n sends and **reports** sent/failed per
+  loan; the answer says whether more are waiting, and the workflow loops until none are (at most
+  50 batches per run). A sent reminder is never claimed again that day, and repeating a report
+  changes nothing. A failed one waits 15 minutes before it can be claimed again, so a run doesn't
+  hammer a failing provider; re-running the workflow later retries it, up to 3 attempts a day,
+  and tomorrow's run sends a fresh reminder anyway. The idempotency key is
+  `reminder:<loanId>:<day>`.
+- A borrower who reported the return isn't reminded while the owner checks. If the owner says
+  it isn't back, reminders resume, so a false report can't silence them.
 
 **Failures are visible, not silent**
 
-- If any reminder fails, the run itself fails. Both workflows name an error workflow that posts
+- If any reminder failed today, the run itself fails. Both workflows name an error workflow that posts
   a signed failure report to Convex, and admins see it on `/board/admin`.
 - Notifications that exhaust their retries appear there too, with a **Retry** button.
 - Each loan shows its latest automation activity ("Overdue reminder sent 2 days ago",
@@ -189,9 +205,11 @@ name and the dates. No descriptions, no IDs of other people, nothing about the o
 - **Public data:** signed-out visitors get tool names and categories only, with no IDs, owners,
   descriptions or dates.
 - **Personal data:** `users` holds only a name and an email, copied from the verified token
-  (never from client arguments). A participant sees the other party's name, and their email only
-  while the loan is approved (to arrange hand-over and return). Admins see names only. The
-  listing form asks people not to put addresses or phone numbers in descriptions.
+  (never from client arguments). The email is used only to send notifications: no user, admin
+  or page ever sees another person's email. Participants see each other's name and the short
+  messages they chose to write (a note with the request, hand-over details with the approval),
+  so sharing contact details is each person's decision. Admins see names, not messages. The
+  listing form asks people not to put addresses or phone numbers in public descriptions.
 - **Logs:** Convex logs event IDs and error codes, never names or emails. n8n logs mock messages
   with the address masked and keeps no data from successful executions.
 - **Audit:** admin actions (removals, trust changes, notification replays) are written to
@@ -204,32 +222,54 @@ name and the dates. No descriptions, no IDs of other people, nothing about the o
 - **Soft deletion:** removed listings are hidden but kept, with their loans and timelines, so
   approved loans can still be closed and their history audited.
 
+## UX, accessibility and performance
+
+- **Flows:** forms open as dialogs where you are (native `<dialog>`: focus moves in and stays in,
+  Escape closes, focus returns to the button that opened it). Irreversible actions ask first.
+  Every action confirms itself in a short message read out by screen readers. Explore has
+  search (a Convex search index, so it works beyond the first page) and category chips. Loans
+  are grouped into what needs an answer, what's current and the past, with statuses that say
+  what a loan means today (Upcoming, On loan, Overdue, Return reported). Return actions appear
+  only once a loan has started; the borrow dialog shows dates already booked.
+- **Accessibility:** skip link, landmarks, one `h1` and a distinct title per page, status
+  pills that never rely on colour alone, 44 px targets, visible focus, reduced motion respected.
+  axe-core reports no violations on any page or dialog, for both an owner and a borrower.
+  Lighthouse accessibility: 100.
+- **Performance:** the public homepage is static and served without the auth middleware;
+  skeletons with real card sizes keep layout shift near zero; one shared timer rolls the date
+  over at midnight; long loan lists skip rendering off-screen cards (`content-visibility`);
+  search is debounced. Lighthouse on the production build: performance 100 desktop and 92
+  on emulated mobile (LCP 2.4 s, CLS 0.03). The remaining best-practice warnings come from Clerk's
+  development domain cookies, which a production Clerk instance on your own domain removes.
+
 ## Testing
 
 ```sh
-npm test            # 23 tests: Convex functions (convex-test) and the n8n Code nodes
+npm test            # 28 tests: Convex functions (convex-test) and the n8n Code nodes
 npm run typecheck
 npm run build
 ```
 
 - **Authorization:** every mutation tried by a stranger and by the wrong party; admin-only
-  queries; self-trust; email visibility.
+  queries; self-trust; disputing a return; no email in any view; messages hidden from admins.
 - **Rules:** overlapping approvals, auto-decline, cancel, expiry, quotas, date validation, and
   that users get readable errors.
-- **Scale regressions:** a new listing stays visible past 500 older ones; an overdue loan is
-  found behind more than 1,000 older loans.
-- **Automation:** reminder claim/lease/report idempotency and retry limits; outbox lease, stale
+- **Scale regressions:** a new listing stays visible past 500 older ones; a free tool behind 250
+  newer tools on loan still reaches the public page; an overdue loan is found behind more than
+  1,000 older loans; 130 overdue loans are handled in two batches.
+- **Automation:** reminder claim/lease/report idempotency, retry delay and limits; outbox lease, stale
   answers, exhaustion and replay; the exact webhook payload; signed HTTP routes rejecting
-  missing, tampered, mis-routed, expired, over-long and wrongly keyed tokens.
+  missing, tampered, mis-routed, wrong-method, expired, over-long, iat-less and wrongly keyed
+  tokens.
 - **n8n Code nodes** run in a sandbox: claim checks, payload-hash check, duplicate suppression,
   address masking, per-reminder results and failure reports. A test regenerates the workflow
   JSON and fails if it differs from what's committed or contains anything secret.
 
 The workflows were also run in n8n 2.46.5 against a local Convex backend, with real signing on
-both sides: a request notification was delivered and recorded; an hourly run reminded an
-overdue borrower, asked an owner to confirm a reported return, and recorded a failure for a
-user without an email; the error workflow posted that failure to Convex; later runs sent no
-duplicates and stopped retrying after three attempts.
+both sides (the reminder schedule set to every minute for the test). Two notifications were
+delivered and recorded on their loans. One reminder run looped over two batches: 130 reminders
+sent, one recorded as failed for a user without an email, and the loan with a reported return
+skipped. The run then failed on purpose, and the error workflow posted the failure to Convex.
 
 CI (`.github/workflows/check.yml`) runs tests, typecheck and build on every push.
 

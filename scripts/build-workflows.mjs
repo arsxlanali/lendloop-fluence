@@ -91,7 +91,7 @@ function checkEvent() {
   if (typeof payload !== "string" || payload.length > 4096 || claims.body_sha256 !== item.payloadSha256)
     throw new Error("Payload does not match its signature");
   const event = JSON.parse(payload);
-  const kinds = ["requested", "approved", "declined", "cancelled", "expired", "return_reported", "returned", "listing_removed"];
+  const kinds = ["requested", "approved", "declined", "cancelled", "expired", "return_reported", "return_disputed", "returned", "booking_cancelled", "listing_removed"];
   if (!kinds.includes(event.kind) || event.eventId !== claims.jti || typeof event.recipient?.name !== "string")
     throw new Error("Unexpected event");
   return [{ json: { event } }];
@@ -113,6 +113,8 @@ function sendNotification() {
     cancelled: `A request for your ${event.tool.name} was cancelled`,
     expired: `Your request for the ${event.tool.name} expired`,
     return_reported: `The borrower says your ${event.tool.name} is back: please confirm`,
+    return_disputed: `The owner says the ${event.tool.name} isn't back yet`,
+    booking_cancelled: `The booking for the ${event.tool.name}${dates} was cancelled`,
     returned: `Return of the ${event.tool.name} confirmed. Thanks!`,
     listing_removed: `An admin removed your listing "${event.tool.name}"`,
   };
@@ -163,7 +165,7 @@ write("request-notification.json", {
 // 2. n8n -> Convex: overdue reminders ----------------------------------------------------------
 x = -240;
 function claimRequest() {
-  return [{ json: { path: "/automation/reminders/claim", body: JSON.stringify({ limit: 100 }) } }];
+  return [{ json: { path: "/automation/reminders/claim", body: "{}" } }];
 }
 function sendReminders() {
   const response = $input.first().json;
@@ -172,10 +174,7 @@ function sendReminders() {
   for (const r of response.reminders) {
     try {
       if (!r.recipient?.email) throw new Error("No email address on file");
-      const subject =
-        r.kind === "confirm_return"
-          ? `Please confirm the return of your ${r.tool.name}`
-          : `Reminder: the ${r.tool.name} was due back on ${r.dueDate}`;
+      const subject = `Reminder: the ${r.tool.name} was due back on ${r.dueDate}`;
       // Mock delivery: a real email/Slack node goes here with r.idempotencyKey as its idempotency key.
       console.log("lendloop.reminder.mock", {
         key: r.idempotencyKey,
@@ -198,39 +197,53 @@ function sendReminders() {
     },
   ];
 }
-function failIfAnyFailed() {
-  const { sent, failed } = $("Send reminders (mock)").first().json;
-  // Failed reminders are recorded in Convex and retried on the next hourly run. Failing this
-  // execution as well hands it to the error workflow, so an admin sees it in the app.
-  if (failed > 0) throw new Error(`${failed} reminder(s) failed, ${sent} sent`);
-  return [{ json: { sent, failed } }];
+function finish() {
+  const { more, failedToday } = $input.first().json;
+  // Failed reminders are recorded in Convex (and shown on each loan). Failing the execution
+  // as well hands it to the error workflow, so an admin sees it in the app.
+  if (more) throw new Error("Stopped after 50 batches with overdue loans left; run again to continue");
+  if (failedToday > 0) throw new Error(`${failedToday} reminder(s) failed today; see the admin page`);
+  return [{ json: { failedToday } }];
 }
 write("overdue-reminders.json", {
   id: "LLoverdueRemind1",
   name: "LendLoop - Overdue reminders",
   active: false,
   nodes: [
-    node("Hourly 09-17 UTC", "n8n-nodes-base.scheduleTrigger", 1.2, {
-      rule: { interval: [{ field: "cronExpression", expression: "0 9-17 * * *" }] },
+    node("Daily 09:00 UTC", "n8n-nodes-base.scheduleTrigger", 1.2, {
+      rule: { interval: [{ field: "cronExpression", expression: "0 9 * * *" }] },
     }),
     node("Claim request", "n8n-nodes-base.code", 2, { jsCode: code(claimRequest) }),
     ...signedCall("claim", "Claim request"),
     node("Send reminders (mock)", "n8n-nodes-base.code", 2, { jsCode: code(sendReminders) }),
     ...signedCall("report", "Send reminders (mock)"),
-    node("Fail run if any reminder failed", "n8n-nodes-base.code", 2, { jsCode: code(failIfAnyFailed) }),
+    // Convex says whether overdue loans are still waiting; claim the next batch of 100 until
+    // none are left. 50 passes (5,000 reminders) at most per run.
+    node("More overdue loans?", "n8n-nodes-base.if", 1, {
+      conditions: { boolean: [{ value1: "={{ $json.more === true && $runIndex < 49 }}", value2: true }] },
+    }),
+    node("Finish", "n8n-nodes-base.code", 2, { jsCode: code(finish) }),
   ],
-  connections: chain(
-    "Hourly 09-17 UTC",
-    "Claim request",
-    "Hash claim body",
-    "Sign claim request",
-    "Send claim to Convex",
-    "Send reminders (mock)",
-    "Hash report body",
-    "Sign report request",
-    "Send report to Convex",
-    "Fail run if any reminder failed",
-  ),
+  connections: {
+    ...chain(
+      "Daily 09:00 UTC",
+      "Claim request",
+      "Hash claim body",
+      "Sign claim request",
+      "Send claim to Convex",
+      "Send reminders (mock)",
+      "Hash report body",
+      "Sign report request",
+      "Send report to Convex",
+      "More overdue loans?",
+    ),
+    "More overdue loans?": {
+      main: [
+        [{ node: "Claim request", type: "main", index: 0 }],
+        [{ node: "Finish", type: "main", index: 0 }],
+      ],
+    },
+  },
   settings: settings({ errorWorkflow: ERROR_WORKFLOW_ID }),
   pinData: {},
   meta,

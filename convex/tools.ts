@@ -12,22 +12,34 @@ function checkCategory(category: string) {
   return category;
 }
 
-// Signed-out visitors: names and categories of tools that are free today, nothing else
-// (no IDs, owners, descriptions or dates).
+// Signed-out visitors: names and categories of tools that are free today, nothing else (no
+// IDs, owners, descriptions or dates). Pages are filled here rather than with paginate(), which
+// would return pages of on-loan tools as empty pages. `next` is the creation time to continue
+// from; null when there is nothing older.
+const PUBLIC_PAGE = 24;
+const PUBLIC_SCAN = 200;
+
 export const publicTools = query({
-  args: { today: v.string(), paginationOpts: paginationOptsValidator },
-  handler: async (ctx, { today, paginationOpts }) => {
+  args: { today: v.string(), before: v.optional(v.number()) },
+  handler: async (ctx, { today, before }) => {
     checkClientToday(today);
-    const result = await ctx.db
+    const tools: { name: string; category: string }[] = [];
+    let scanned = 0;
+    let last: number | null = null;
+    const newestFirst = ctx.db
       .query("tools")
-      .withIndex("active", (q) => q.eq("deleted", false))
-      .order("desc")
-      .paginate(paginationOpts);
-    const page = [];
-    for (const t of result.page)
+      .withIndex("active", (q) =>
+        before === undefined ? q.eq("deleted", false) : q.eq("deleted", false).lt("_creationTime", before),
+      )
+      .order("desc");
+    for await (const t of newestFirst) {
+      if (tools.length >= PUBLIC_PAGE || scanned >= PUBLIC_SCAN) return { tools, next: last };
+      scanned++;
+      last = t._creationTime;
       if ((await availability(ctx, t._id, today)).available)
-        page.push({ name: t.name, category: t.category });
-    return { ...result, page };
+        tools.push({ name: t.name, category: t.category });
+    }
+    return { tools, next: null };
   },
 });
 
@@ -54,18 +66,26 @@ async function toolView(
 export const browse = query({
   args: {
     category: v.optional(v.string()),
+    search: v.optional(v.string()),
     today: v.string(),
     paginationOpts: paginationOptsValidator,
   },
-  handler: async (ctx, { category, today, paginationOpts }) => {
+  handler: async (ctx, { category, search, today, paginationOpts }) => {
     const me = await actor(ctx);
     checkClientToday(today);
-    const tools = category
-      ? ctx.db
-          .query("tools")
-          .withIndex("category", (q) => q.eq("deleted", false).eq("category", checkCategory(category)))
-      : ctx.db.query("tools").withIndex("active", (q) => q.eq("deleted", false));
-    const result = await tools.order("desc").paginate(paginationOpts);
+    const cat = category ? checkCategory(category) : undefined;
+    const term = search?.trim().slice(0, 60);
+    // A search is ranked by relevance; otherwise newest first.
+    const tools = term
+      ? ctx.db.query("tools").withSearchIndex("search", (q) => {
+          const s = q.search("name", term).eq("deleted", false);
+          return cat ? s.eq("category", cat) : s;
+        })
+      : (cat
+          ? ctx.db.query("tools").withIndex("category", (q) => q.eq("deleted", false).eq("category", cat))
+          : ctx.db.query("tools").withIndex("active", (q) => q.eq("deleted", false))
+        ).order("desc");
+    const result = await tools.paginate(paginationOpts);
     // Tools I already asked for, so the card can say so instead of offering another request.
     const mine = await ctx.db
       .query("loans")
@@ -77,6 +97,20 @@ export const browse = query({
     for (const t of result.page)
       page.push({ ...(await toolView(ctx, t, me, today, cache)), requested: requested.has(t._id) });
     return { ...result, page };
+  },
+});
+
+// Dates already taken, shown when choosing dates. Ranges only: nothing about who borrows.
+export const bookings = query({
+  args: { toolId: v.id("tools"), today: v.string() },
+  handler: async (ctx, { toolId, today }) => {
+    await actor(ctx);
+    checkClientToday(today);
+    const loans = await ctx.db
+      .query("loans")
+      .withIndex("tool", (q) => q.eq("toolId", toolId).eq("status", "approved").gte("end", today))
+      .take(10);
+    return loans.map((l) => ({ start: l.start, end: l.end }));
   },
 });
 

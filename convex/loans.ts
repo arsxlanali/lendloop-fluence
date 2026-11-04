@@ -8,6 +8,7 @@ import { loanStatus } from "./schema";
 import {
   addDays,
   checkClientToday,
+  cleanText,
   LIMITS,
   overlaps,
   utcToday,
@@ -15,10 +16,17 @@ import {
 } from "../lib/policy";
 
 export const requestLoan = mutation({
-  args: { toolId: v.id("tools"), start: v.string(), end: v.string(), today: v.string() },
+  args: {
+    toolId: v.id("tools"),
+    start: v.string(),
+    end: v.string(),
+    today: v.string(),
+    note: v.optional(v.string()),
+  },
   handler: async (ctx, a) => {
     const me = await actor(ctx);
     validateDates(a.start, a.end, checkClientToday(a.today));
+    const note = cleanText(a.note ?? "", LIMITS.noteLength, "Message", false);
     await rememberProfile(ctx);
     const t = await ctx.db.get(a.toolId);
     requireThat(t && !t.deleted, "That listing is no longer available.");
@@ -50,6 +58,7 @@ export const requestLoan = mutation({
       owner: t.owner,
       borrower: me.subject,
       status: "pending",
+      requestNote: note || undefined,
     });
     await notify(ctx, { loanId: id, kind: "requested", recipient: t.owner, actor: me.subject });
     return id;
@@ -69,10 +78,17 @@ export const cancelRequest = mutation({
 });
 
 export const decide = mutation({
-  args: { id: v.id("loans"), approve: v.boolean(), today: v.string() },
-  handler: async (ctx, { id, approve, today }) => {
+  args: {
+    id: v.id("loans"),
+    approve: v.boolean(),
+    today: v.string(),
+    // Hand-over details for the borrower (where, when). Only used when approving.
+    note: v.optional(v.string()),
+  },
+  handler: async (ctx, { id, approve, today, note }) => {
     const me = await actor(ctx);
     checkClientToday(today);
+    const handoverNote = cleanText(note ?? "", LIMITS.noteLength, "Message", false);
     const l = await ctx.db.get(id);
     requireThat(l && l.owner === me.subject, "You can only answer requests for your own tools.");
     requireThat(l.status === "pending", "This request has already been answered.");
@@ -92,7 +108,7 @@ export const decide = mutation({
       !booked.some((x) => overlaps(l.start, l.end, x.start, x.end)),
       "Another approved loan overlaps these dates.",
     );
-    await ctx.db.patch(id, { status: "approved" });
+    await ctx.db.patch(id, { status: "approved", handoverNote: handoverNote || undefined });
     await notify(ctx, { loanId: id, kind: "approved", recipient: l.borrower, actor: me.subject });
     // Requests for the same dates can no longer be met: answer them now instead of leaving
     // those neighbors waiting.
@@ -109,29 +125,77 @@ export const decide = mutation({
 });
 
 // The borrower says the tool is back. The loan stays open (and the tool unavailable) until the
-// owner confirms, so a borrower cannot close a loan, or stop reminders, on their own.
+// owner confirms. Overdue reminders pause meanwhile; if the owner says it isn't back
+// (disputeReturn), they resume, so a false report cannot silence them.
 export const reportReturn = mutation({
-  args: { id: v.id("loans") },
-  handler: async (ctx, { id }) => {
+  args: { id: v.id("loans"), today: v.string() },
+  handler: async (ctx, { id, today }) => {
     const me = await actor(ctx);
+    checkClientToday(today);
     const l = await ctx.db.get(id);
     requireThat(l && l.borrower === me.subject, "You can only report returns for your own loans.");
     requireThat(l.status === "approved", "This loan is not active.");
+    requireThat(l.start <= today, "This loan hasn't started yet. Cancel the booking instead.");
     requireThat(l.returnReportedAt === undefined, "You already reported this return.");
     await ctx.db.patch(id, { returnReportedAt: Date.now() });
     await notify(ctx, { loanId: id, kind: "return_reported", recipient: l.owner, actor: me.subject });
   },
 });
 
-export const confirmReturn = mutation({
+export const disputeReturn = mutation({
   args: { id: v.id("loans") },
   handler: async (ctx, { id }) => {
     const me = await actor(ctx);
     const l = await ctx.db.get(id);
+    requireThat(l && l.owner === me.subject, "Only the owner can answer a reported return.");
+    requireThat(l.status === "approved" && l.returnReportedAt !== undefined, "No return to answer.");
+    await ctx.db.patch(id, { returnReportedAt: undefined });
+    await notify(ctx, { loanId: id, kind: "return_disputed", recipient: l.borrower, actor: me.subject });
+  },
+});
+
+export const confirmReturn = mutation({
+  args: { id: v.id("loans"), today: v.string() },
+  handler: async (ctx, { id, today }) => {
+    const me = await actor(ctx);
+    checkClientToday(today);
+    const l = await ctx.db.get(id);
     requireThat(l && l.owner === me.subject, "Only the owner can confirm a return.");
     requireThat(l.status === "approved", "This loan is not active.");
+    requireThat(l.start <= today, "This loan hasn't started yet. Cancel the booking instead.");
     await ctx.db.patch(id, { status: "returned" });
     await notify(ctx, { loanId: id, kind: "returned", recipient: l.borrower, actor: me.subject });
+  },
+});
+
+// Either party can call off an approved loan before it starts; the other one is told.
+export const cancelBooking = mutation({
+  args: { id: v.id("loans"), today: v.string() },
+  handler: async (ctx, { id, today }) => {
+    const me = await actor(ctx);
+    checkClientToday(today);
+    const l = await ctx.db.get(id);
+    requireThat(l && (l.owner === me.subject || l.borrower === me.subject), "You can only cancel your own bookings.");
+    requireThat(l.status === "approved", "Only approved bookings can be cancelled.");
+    requireThat(l.start > today, "This loan has started. Mark it returned instead.");
+    await ctx.db.patch(id, { status: "cancelled" });
+    const other = l.owner === me.subject ? l.borrower : l.owner;
+    await notify(ctx, { loanId: id, kind: "booking_cancelled", recipient: other, actor: me.subject });
+  },
+});
+
+// Open loans by status for one side (at most 50: open requests and bookings are bounded).
+export const byStatus = query({
+  args: { as: v.union(v.literal("owner"), v.literal("borrower")), status: loanStatus },
+  handler: async (ctx, { as, status }) => {
+    const me = await actor(ctx);
+    const loans = await (as === "owner"
+      ? ctx.db.query("loans").withIndex("ownerStatus", (q) => q.eq("owner", me.subject).eq("status", status))
+      : ctx.db.query("loans").withIndex("borrowerStatus", (q) => q.eq("borrower", me.subject).eq("status", status))
+    )
+      .order("desc")
+      .take(50);
+    return await Promise.all(loans.map((l) => loanView(ctx, l, me)));
   },
 });
 
@@ -187,7 +251,7 @@ export const adminLoans = query({
       ? ctx.db.query("loans").withIndex("statusEnd", (q) => q.eq("status", status))
       : ctx.db.query("loans");
     const result = await loans.order("desc").paginate(paginationOpts);
-    return { ...result, page: await Promise.all(result.page.map((l) => loanView(ctx, l, me))) };
+    return { ...result, page: await Promise.all(result.page.map((l) => loanView(ctx, l, me, true))) };
   },
 });
 

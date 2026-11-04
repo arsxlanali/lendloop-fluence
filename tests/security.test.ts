@@ -51,15 +51,15 @@ describe("public page and authentication", () => {
     const s = setup();
     const { loan } = await listAndRequest(s);
     await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Ladder" });
-    const shown = await s.t.query(api.tools.publicTools, { today: TODAY, paginationOpts: page });
-    expect(shown.page).toEqual([
+    const shown = await s.t.query(api.tools.publicTools, { today: TODAY });
+    expect(shown).toEqual({ next: null, tools: [
       { name: "Ladder", category: "Power tools" },
       { name: "Cordless drill", category: "Power tools" },
-    ]);
+    ] });
     await s.owner.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY });
     vi.setSystemTime(new Date("2026-11-05T10:00:00Z"));
-    const later = await s.t.query(api.tools.publicTools, { today: "2026-11-05", paginationOpts: page });
-    expect(later.page.map((t) => t.name)).toEqual(["Ladder"]);
+    const later = await s.t.query(api.tools.publicTools, { today: "2026-11-05" });
+    expect(later.tools.map((t) => t.name)).toEqual(["Ladder"]);
     await expect(s.t.mutation(api.tools.saveTool, fields)).rejects.toThrow();
     await expect(s.t.query(api.tools.browse, { today: TODAY, paginationOpts: page })).rejects.toThrow();
   });
@@ -73,10 +73,25 @@ describe("public page and authentication", () => {
     await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Brand new tent" });
     const first = await s.borrower.query(api.tools.browse, { today: TODAY, paginationOpts: { numItems: 24, cursor: null } });
     expect(first.page[0].name).toBe("Brand new tent");
-    expect(await s.t.query(api.tools.publicTools, { today: TODAY, paginationOpts: { numItems: 1, cursor: null } })).toMatchObject({
-      page: [{ name: "Brand new tent" }],
-    });
+    expect((await s.t.query(api.tools.publicTools, { today: TODAY })).tools[0].name).toBe("Brand new tent");
     expect((await s.owner.query(api.tools.myListings, { today: TODAY })).map((t) => t.name)).toEqual(["Brand new tent"]);
+  });
+
+  test("free tools behind newer ones on loan still reach the public page (regression)", async () => {
+    const s = setup();
+    await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Old free saw" });
+    // 250 newer tools, all on loan today: more than one scan's worth.
+    await s.t.run(async (ctx) => {
+      for (let i = 0; i < 250; i++) {
+        const toolId = await ctx.db.insert("tools", { ...fields, owner: "busy", deleted: false });
+        await ctx.db.insert("loans", { toolId, owner: "busy", borrower: "b", start: "2026-11-01", end: "2026-11-30", status: "approved" });
+      }
+    });
+    const first = await s.t.query(api.tools.publicTools, { today: TODAY });
+    expect(first.tools).toEqual([]);
+    expect(first.next).not.toBeNull();
+    const second = await s.t.query(api.tools.publicTools, { today: TODAY, before: first.next! });
+    expect(second).toEqual({ tools: [{ name: "Old free saw", category: "Power tools" }], next: null });
   });
 
   test("a client date more than a day from UTC is rejected", async () => {
@@ -94,8 +109,9 @@ describe("authorization is enforced on the server", () => {
       () => s.stranger.mutation(api.tools.removeTool, { id: tool }),
       () => s.stranger.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY }),
       () => s.stranger.mutation(api.loans.cancelRequest, { id: loan }),
-      () => s.stranger.mutation(api.loans.reportReturn, { id: loan }),
-      () => s.stranger.mutation(api.loans.confirmReturn, { id: loan }),
+      () => s.stranger.mutation(api.loans.reportReturn, { id: loan, today: TODAY }),
+      () => s.stranger.mutation(api.loans.confirmReturn, { id: loan, today: TODAY }),
+      () => s.stranger.mutation(api.loans.cancelBooking, { id: loan, today: TODAY }),
       () => s.stranger.mutation(api.tools.setTrusted, { toolId: tool, trusted: true }),
       () => s.stranger.query(api.loans.adminLoans, { paginationOpts: page }),
       () => s.stranger.query(api.notify.failures, {}),
@@ -111,17 +127,23 @@ describe("authorization is enforced on the server", () => {
     const s = setup();
     const { tool, loan } = await listAndRequest(s);
     await s.owner.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY });
-    await expect(s.borrower.mutation(api.loans.confirmReturn, { id: loan })).rejects.toThrow(ConvexError);
-    await s.borrower.mutation(api.loans.reportReturn, { id: loan });
+    vi.setSystemTime(new Date("2026-11-05T10:00:00Z"));
+    const day = "2026-11-05";
+    await expect(s.borrower.mutation(api.loans.confirmReturn, { id: loan, today: day })).rejects.toThrow(ConvexError);
+    await s.borrower.mutation(api.loans.reportReturn, { id: loan, today: day });
     expect(await s.owner.query(api.loans.needsAnswer, {})).toMatchObject([{ _id: loan, returnReported: true }]);
     vi.setSystemTime(new Date("2026-11-06T10:00:00Z"));
     const [view] = await s.borrower.query(api.tools.browse, { today: "2026-11-06", paginationOpts: page }).then((r) => r.page);
     expect(view).toMatchObject({ _id: tool, available: false });
-    // Overdue: the reminder now asks the owner to confirm instead of chasing the borrower.
+    // Overdue but reported: not chased while the owner checks. A false report doesn't silence
+    // reminders: the owner says it isn't back, and the borrower is reminded again.
     vi.setSystemTime(new Date("2026-11-09T10:00:00Z"));
-    const claim = await s.t.mutation(internal.automation.claimReminders, { limit: 10 });
-    expect(claim.reminders).toMatchObject([{ kind: "confirm_return", recipient: { name: "OWNER" } }]);
-    await s.owner.mutation(api.loans.confirmReturn, { id: loan });
+    expect((await s.t.mutation(internal.automation.claimReminders, {})).reminders).toEqual([]);
+    await expect(s.borrower.mutation(api.loans.disputeReturn, { id: loan })).rejects.toThrow(ConvexError);
+    await s.owner.mutation(api.loans.disputeReturn, { id: loan });
+    const claim = await s.t.mutation(internal.automation.claimReminders, {});
+    expect(claim.reminders).toMatchObject([{ loanId: loan, recipient: { name: "BORROWER" } }]);
+    await s.owner.mutation(api.loans.confirmReturn, { id: loan, today: "2026-11-09" });
     const [after] = await s.borrower.query(api.loans.myRequests, { paginationOpts: page }).then((r) => r.page);
     expect(after.status).toBe("returned");
   });
@@ -150,21 +172,57 @@ describe("authorization is enforced on the server", () => {
     expect(rows.loans[0].status).toBe("declined");
   });
 
-  test("participants see each other's email only while the loan is approved; admins see names only", async () => {
+  test("nobody sees anyone's email; notes are for the two participants only", async () => {
     const s = setup();
-    const { loan } = await listAndRequest(s);
-    const [pending] = (await s.owner.query(api.loans.incoming, { paginationOpts: page })).page;
-    expect(pending.counterpart).toEqual({ name: "BORROWER", email: undefined });
-    await s.owner.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY });
-    const [approved] = (await s.borrower.query(api.loans.myRequests, { paginationOpts: page })).page;
-    expect(approved.counterpart).toEqual({ name: "OWNER", email: "owner@example.com" });
+    const tool = await s.owner.mutation(api.tools.saveTool, fields);
+    const loan = await s.borrower.mutation(api.loans.requestLoan, {
+      toolId: tool, start: "2026-11-05", end: "2026-11-07", today: TODAY, note: "  For a shelf  ",
+    });
+    await s.owner.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY, note: "Side gate, Sat 10am" });
+    const [asOwner] = (await s.owner.query(api.loans.incoming, { paginationOpts: page })).page;
+    const [asBorrower] = (await s.borrower.query(api.loans.myRequests, { paginationOpts: page })).page;
+    expect(asOwner).toMatchObject({ counterpart: { name: "BORROWER" }, requestNote: "For a shelf", handoverNote: "Side gate, Sat 10am" });
+    expect(asBorrower).toMatchObject({ counterpart: { name: "OWNER" }, requestNote: "For a shelf", handoverNote: "Side gate, Sat 10am" });
     const [asAdmin] = (await s.admin.query(api.loans.adminLoans, { paginationOpts: page })).page;
     expect(asAdmin).toMatchObject({ role: "admin", ownerName: "OWNER", borrowerName: "BORROWER" });
-    expect(asAdmin.counterpart).toBeUndefined();
+    expect([asAdmin.counterpart, asAdmin.requestNote, asAdmin.handoverNote]).toEqual([undefined, undefined, undefined]);
+    for (const view of [asOwner, asBorrower, asAdmin]) expect(JSON.stringify(view)).not.toContain("@example.com");
+    expect(await message(s.borrower.mutation(api.loans.requestLoan, {
+      toolId: tool, start: "2026-11-20", end: "2026-11-21", today: TODAY, note: "x".repeat(501),
+    }))).toMatch(/Message can be at most 500/);
   });
 });
 
 describe("loan rules", () => {
+  test("returns only once a loan has started; before that either side can cancel the booking", async () => {
+    const s = setup();
+    const { tool, loan } = await listAndRequest(s);
+    await s.owner.mutation(api.loans.decide, { id: loan, approve: true, today: TODAY });
+    expect(await message(s.borrower.mutation(api.loans.reportReturn, { id: loan, today: TODAY }))).toMatch(/hasn't started/);
+    expect(await message(s.owner.mutation(api.loans.confirmReturn, { id: loan, today: TODAY }))).toMatch(/hasn't started/);
+    expect(await s.borrower.query(api.tools.bookings, { toolId: tool, today: TODAY })).toEqual([{ start: "2026-11-05", end: "2026-11-07" }]);
+    await s.borrower.mutation(api.loans.cancelBooking, { id: loan, today: TODAY });
+    const events = await s.t.run((ctx) => ctx.db.query("events").collect());
+    expect(events.at(-1)).toMatchObject({ kind: "booking_cancelled", recipient: "owner" });
+    expect(await s.borrower.query(api.tools.bookings, { toolId: tool, today: TODAY })).toEqual([]);
+    // A started loan can't be cancelled, only returned.
+    const again = await s.borrower.mutation(api.loans.requestLoan, { toolId: tool, start: TODAY, end: "2026-11-06", today: TODAY });
+    await s.owner.mutation(api.loans.decide, { id: again, approve: true, today: TODAY });
+    expect(await message(s.owner.mutation(api.loans.cancelBooking, { id: again, today: TODAY }))).toMatch(/has started/);
+  });
+
+  test("search finds tools by name, within a category", async () => {
+    const s = setup();
+    await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Cordless drill" });
+    await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Hammer drill" });
+    await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Drill bits", category: "Other" });
+    await s.owner.mutation(api.tools.saveTool, { ...fields, name: "Tent" });
+    const find = async (search: string, category?: string) =>
+      (await s.borrower.query(api.tools.browse, { today: TODAY, search, category, paginationOpts: page })).page.map((t) => t.name).sort();
+    expect(await find("drill")).toEqual(["Cordless drill", "Drill bits", "Hammer drill"]);
+    expect(await find("drill", "Power tools")).toEqual(["Cordless drill", "Hammer drill"]);
+  });
+
   test("approving one request declines the overlapping ones (regression); cancel works", async () => {
     const s = setup();
     const { tool, loan } = await listAndRequest(s);
@@ -232,31 +290,53 @@ describe("reminder write-backs", () => {
     const s = setup();
     const loan = await overdueLoan(s);
     vi.setSystemTime(new Date("2026-11-08T09:00:00Z"));
-    const first = await s.t.mutation(internal.automation.claimReminders, { limit: 10 });
-    expect(first.reminders).toMatchObject([{ loanId: loan, kind: "overdue", daysOverdue: 2, idempotencyKey: `reminder:${loan}:2026-11-08` }]);
+    const first = await s.t.mutation(internal.automation.claimReminders, {});
+    expect(first.reminders).toMatchObject([{ loanId: loan, daysOverdue: 2, idempotencyKey: `reminder:${loan}:2026-11-08` }]);
     // A retried or overlapping run gets nothing while the claim is leased.
-    expect((await s.t.mutation(internal.automation.claimReminders, { limit: 10 })).reminders).toEqual([]);
+    expect((await s.t.mutation(internal.automation.claimReminders, {})).reminders).toEqual([]);
     const report = { results: [{ loanId: loan, day: "2026-11-08", status: "sent" as const }] };
-    expect(await s.t.mutation(internal.automation.reportReminders, report)).toEqual({ recorded: 1 });
-    expect(await s.t.mutation(internal.automation.reportReminders, report)).toEqual({ recorded: 0 });
+    expect(await s.t.mutation(internal.automation.reportReminders, report)).toEqual({ recorded: 1, more: false, failedToday: 0 });
+    expect(await s.t.mutation(internal.automation.reportReminders, report)).toEqual({ recorded: 0, more: false, failedToday: 0 });
     vi.setSystemTime(new Date("2026-11-08T15:00:00Z"));
-    expect((await s.t.mutation(internal.automation.claimReminders, { limit: 10 })).reminders).toEqual([]);
+    expect((await s.t.mutation(internal.automation.claimReminders, {})).reminders).toEqual([]);
     const activity = await s.t.run((ctx) => ctx.db.query("activity").collect());
     expect(activity.filter((a) => a.kind === "reminder_sent")).toHaveLength(1);
   });
 
-  test("a failed reminder is retried on later runs, at most three times a day", async () => {
+  test("a failed reminder waits before a retry, at most three attempts a day, and is reported", async () => {
     const s = setup();
     const loan = await overdueLoan(s);
-    vi.setSystemTime(new Date("2026-11-08T09:00:00Z"));
-    for (let run = 0; run < 4; run++) {
-      const { reminders } = await s.t.mutation(internal.automation.claimReminders, { limit: 10 });
-      expect(reminders).toHaveLength(run < 3 ? 1 : 0);
-      if (reminders.length)
-        await s.t.mutation(internal.automation.reportReminders, {
-          results: [{ loanId: loan, day: "2026-11-08", status: "failed", error: "provider down" }],
-        });
+    let now = Date.parse("2026-11-08T09:00:00Z");
+    vi.setSystemTime(now);
+    const failed = { results: [{ loanId: loan, day: "2026-11-08", status: "failed" as const, error: "provider down" }] };
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const { reminders } = await s.t.mutation(internal.automation.claimReminders, {});
+      expect(reminders).toHaveLength(attempt <= 3 ? 1 : 0);
+      if (!reminders.length) break;
+      // The same daily run doesn't loop on it: nothing more to claim until the delay passes.
+      expect(await s.t.mutation(internal.automation.reportReminders, failed)).toEqual({ recorded: 1, more: false, failedToday: 1 });
+      expect((await s.t.mutation(internal.automation.claimReminders, {})).reminders).toEqual([]);
+      vi.setSystemTime((now += 16 * 60_000));
     }
+  });
+
+  test("more than one batch: the report says to claim again until none are left", async () => {
+    const s = setup();
+    const tool = await s.owner.mutation(api.tools.saveTool, fields);
+    await s.t.run(async (ctx) => {
+      for (let i = 0; i < 130; i++)
+        await ctx.db.insert("loans", { toolId: tool, owner: "owner", borrower: `b${i}`, start: "2026-10-01", end: "2026-10-02", status: "approved" });
+    });
+    const sendAll = async () => {
+      const { day, reminders } = await s.t.mutation(internal.automation.claimReminders, {});
+      const report = await s.t.mutation(internal.automation.reportReminders, {
+        results: reminders.map((r) => ({ loanId: r.loanId, day, status: "sent" as const })),
+      });
+      return [reminders.length, report.more];
+    };
+    expect(await sendAll()).toEqual([100, true]);
+    expect(await sendAll()).toEqual([30, false]);
+    expect(await sendAll()).toEqual([0, false]);
   });
 
   test("finds overdue loans behind more than 1000 older loans (regression)", async () => {
@@ -268,7 +348,7 @@ describe("reminder write-backs", () => {
     });
     const loan = await overdueLoan(s);
     vi.setSystemTime(new Date("2026-11-08T09:00:00Z"));
-    const { reminders } = await s.t.mutation(internal.automation.claimReminders, { limit: 10 });
+    const { reminders } = await s.t.mutation(internal.automation.claimReminders, {});
     expect(reminders.map((r) => r.loanId)).toEqual([loan]);
   });
 });
@@ -302,8 +382,10 @@ describe("signed automation HTTP", () => {
     expect((await s.t.fetch(path, { ...tampered, body: JSON.stringify({ limit: 200 }) })).status).toBe(401);
     expect((await s.t.fetch(path, await signed("/automation/failures", body, { path: "/automation/failures" }))).status).toBe(401);
     expect((await s.t.fetch(path, await signed(path, body, { iss: "someone-else" }))).status).toBe(401);
-    expect((await s.t.fetch(path, await signed(path, body, { exp: Math.floor(Date.now() / 1000) - 1 }))).status).toBe(401);
+    expect((await s.t.fetch(path, await signed(path, body, { exp: Math.floor(Date.now() / 1000) - 10 }))).status).toBe(401);
     expect((await s.t.fetch(path, await signed(path, body, { exp: Math.floor(Date.now() / 1000) + 3600 }))).status).toBe(401);
+    expect((await s.t.fetch(path, await signed(path, body, { iat: undefined }))).status).toBe(401);
+    expect((await s.t.fetch(path, await signed(path, body, { method: "GET" }))).status).toBe(401);
     const otherKey = await signToken("o".repeat(48), {
       iss: "lendloop-n8n", aud: "lendloop-convex", iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 60,
       method: "POST", path, body_sha256: await sha256Hex(body),

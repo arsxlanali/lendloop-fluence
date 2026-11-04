@@ -1,113 +1,281 @@
 "use client";
+import { useId, useState } from "react";
 import { useMutation } from "convex/react";
 import type { LoanView } from "../convex/model";
 import { api } from "../convex/_generated/api";
-import { activityLabel, ago, formatDay, isAutomation, STATUS } from "./format";
+import { activityLabel, ago, formatRange, isAutomation, loanState } from "./format";
 import { useRunner, useToday } from "./hooks";
+import { ConfirmDialog, Modal, Pill, Skeletons } from "./ui";
+import { LIMITS } from "../lib/policy";
 
-export function LoanCard({ loan }: { loan: LoanView }) {
+type Dialog = "approve" | "decline" | "cancelRequest" | "cancelBooking" | null;
+
+function ApproveDialog({ loan, onClose }: { loan: LoanView; onClose: () => void }) {
+  const decide = useMutation(api.loans.decide);
+  const today = useToday();
+  const [note, setNote] = useState("");
+  const { busy, error, run } = useRunner();
+  return (
+    <Modal
+      title={`Approve ${loan.counterpart?.name}'s request`}
+      description={`${loan.toolName}, ${formatRange(loan.start, loan.end)}. Other requests for these dates will be declined.`}
+      onClose={onClose}
+    >
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          const ok = await run(
+            "approve",
+            () => decide({ id: loan._id, approve: true, today, note }),
+            `Approved. ${loan.counterpart?.name} has been told.`,
+          );
+          if (ok) onClose();
+        }}
+      >
+        {error && (
+          <p role="alert" className="error">
+            {error}
+          </p>
+        )}
+        <label>
+          Hand-over details (optional)
+          <textarea
+            value={note}
+            maxLength={LIMITS.noteLength}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Where and when to pick it up. Only they will see this."
+          />
+        </label>
+        <div className="actions end">
+          <button type="button" className="secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button disabled={busy !== null}>{busy ? "Approving…" : "Approve"}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+export function LoanCard({ loan, readOnly = false }: { loan: LoanView; readOnly?: boolean }) {
   const decide = useMutation(api.loans.decide);
   const cancel = useMutation(api.loans.cancelRequest);
+  const cancelBooking = useMutation(api.loans.cancelBooking);
   const report = useMutation(api.loans.reportReturn);
   const confirm = useMutation(api.loans.confirmReturn);
+  const dispute = useMutation(api.loans.disputeReturn);
   const today = useToday();
+  const titleId = useId();
+  const historyId = useId();
+  const [dialog, setDialog] = useState<Dialog>(null);
+  const [showHistory, setShowHistory] = useState(false);
   const { busy, error, run } = useRunner();
-  const overdue = loan.status === "approved" && loan.end < today;
+  const state = loanState(loan, today);
+  const started = loan.start <= today;
+  const owner = !readOnly && loan.role === "owner";
+  const borrower = !readOnly && loan.role === "borrower";
+  const other = loan.counterpart?.name ?? "them";
   const lastAutomation = loan.activity.find((a) => isAutomation(a.kind));
   const disabled = busy !== null;
+  const act = (key: string, fn: () => Promise<unknown>, done: string) => () => void run(key, fn, done);
   return (
-    <article className="loan">
-      <div>
-        <span className={overdue ? "eyebrow warn-text" : "eyebrow"}>
-          {overdue ? "Overdue" : STATUS[loan.status]}
-          {loan.toolRemoved ? " · listing removed" : ""}
-        </span>
-        <h3>{loan.toolName}</h3>
-        <p>
-          {formatDay(loan.start)} → {formatDay(loan.end)}
+    <li className="loan" aria-labelledby={titleId}>
+      <div className="loan-main">
+        <div className="loan-head">
+          <Pill tone={state.tone}>{state.label}</Pill>
+          {loan.toolRemoved && <span className="tag">Listing removed</span>}
+        </div>
+        <h3 id={titleId}>{loan.toolName}</h3>
+        <p className="loan-meta">
+          <span>{formatRange(loan.start, loan.end)}</span>
+          {loan.counterpart && (
+            <span>
+              {loan.role === "owner" ? "Requested by" : "Lent by"} {loan.counterpart.name}
+            </span>
+          )}
+          {loan.role === "admin" && (
+            <span>
+              {loan.borrowerName} borrows from {loan.ownerName}
+            </span>
+          )}
         </p>
-        {loan.counterpart && (
-          <p>
-            {loan.role === "owner" ? "Requested by" : "Lent by"} {loan.counterpart.name}
-            {loan.counterpart.email && (
-              <>
-                {" · "}
-                <a href={`mailto:${loan.counterpart.email}`}>{loan.counterpart.email}</a>
-              </>
-            )}
-          </p>
+        {loan.requestNote && (
+          <blockquote>
+            <span>{loan.role === "borrower" ? "Your message" : `${other} wrote`}</span>
+            {loan.requestNote}
+          </blockquote>
         )}
-        {loan.role === "admin" && (
-          <p>
-            {loan.borrowerName} borrows from {loan.ownerName}
-          </p>
+        {loan.handoverNote && (
+          <blockquote>
+            <span>{loan.role === "owner" ? "Your hand-over details" : "Hand-over details"}</span>
+            {loan.handoverNote}
+          </blockquote>
         )}
-        {loan.status === "approved" && loan.returnReported && (
+        {loan.status === "approved" && loan.returnReported && !readOnly && (
           <p className="notice">
-            {loan.role === "owner"
-              ? "The borrower says it's back. Confirm once you have it."
-              : "Return reported. Waiting for the owner to confirm."}
+            {owner
+              ? `${other} says it's back. Confirm once you have it, or say it isn't back yet.`
+              : "You reported the return. Waiting for the owner to confirm."}
           </p>
-        )}
-        {lastAutomation && (
-          <p className="automation">
-            {activityLabel(lastAutomation.kind, lastAutomation.by)} {ago(lastAutomation.at)}
-          </p>
-        )}
-        {loan.activity.length > 0 && (
-          <details>
-            <summary>Recent activity</summary>
-            <ul>
-              {loan.activity.map((a, i) => (
-                <li key={i}>
-                  {activityLabel(a.kind, a.by)} · {ago(a.at)}
-                </li>
-              ))}
-            </ul>
-          </details>
         )}
         {error && (
           <p role="alert" className="error">
             {error}
           </p>
         )}
-      </div>
-      <div className="actions">
-        {loan.role === "owner" && loan.status === "pending" && (
-          <>
-            <button disabled={disabled} onClick={() => run("approve", () => decide({ id: loan._id, approve: true, today }))}>
-              {busy === "approve" ? "Approving…" : "Approve"}
-            </button>
+        {/* The toggle stays put; the timeline opens in its own row underneath. */}
+        <div className="loan-foot">
+          {loan.activity.length > 0 && (
             <button
-              className="secondary"
-              disabled={disabled}
-              onClick={() => run("decline", () => decide({ id: loan._id, approve: false, today }))}
+              type="button"
+              className="history-toggle"
+              aria-expanded={showHistory}
+              aria-controls={historyId}
+              onClick={() => setShowHistory((open) => !open)}
             >
+              <span className="chevron" aria-hidden="true" />
+              History<span className="visually-hidden"> of the {loan.toolName} loan</span>
+            </button>
+          )}
+          {lastAutomation && (
+            <span className="automation">
+              {activityLabel(lastAutomation.kind, lastAutomation.by)} {ago(lastAutomation.at)}
+            </span>
+          )}
+        </div>
+        {loan.activity.length > 0 && (
+          <ol id={historyId} className="timeline" hidden={!showHistory}>
+            {loan.activity.map((a, i) => (
+              <li key={i} className={isAutomation(a.kind) ? "automated" : undefined}>
+                <span>{activityLabel(a.kind, a.by)}</span>
+                <time dateTime={new Date(a.at).toISOString()} title={new Date(a.at).toLocaleString()}>
+                  {ago(a.at)}
+                </time>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+      <div className="loan-actions">
+        {owner && loan.status === "pending" && (
+          <>
+            <button disabled={disabled} onClick={() => setDialog("approve")} aria-describedby={titleId}>
+              Approve…
+            </button>
+            <button className="secondary" disabled={disabled} onClick={() => setDialog("decline")} aria-describedby={titleId}>
               Decline
             </button>
           </>
         )}
-        {loan.role === "owner" && loan.status === "approved" && (
+        {owner && loan.status === "approved" && started && (
           <button
             className={loan.returnReported ? "" : "secondary"}
             disabled={disabled}
-            onClick={() => run("confirm", () => confirm({ id: loan._id }))}
+            aria-describedby={titleId}
+            onClick={act("confirm", () => confirm({ id: loan._id, today }), "Return confirmed. Thanks for lending!")}
           >
-            Confirm returned
+            {busy === "confirm" ? "Saving…" : "Confirm returned"}
           </button>
         )}
-        {loan.role === "borrower" && loan.status === "pending" && (
-          <button className="secondary" disabled={disabled} onClick={() => run("cancel", () => cancel({ id: loan._id }))}>
+        {owner && loan.status === "approved" && loan.returnReported && (
+          <button
+            className="secondary"
+            disabled={disabled}
+            aria-describedby={titleId}
+            onClick={act("dispute", () => dispute({ id: loan._id }), `${other} has been told it isn't back yet.`)}
+          >
+            Not back yet
+          </button>
+        )}
+        {borrower && loan.status === "approved" && started && !loan.returnReported && (
+          <button
+            disabled={disabled}
+            aria-describedby={titleId}
+            onClick={act("report", () => report({ id: loan._id, today }), `${other} has been asked to confirm the return.`)}
+          >
+            {busy === "report" ? "Saving…" : "I've returned it"}
+          </button>
+        )}
+        {borrower && loan.status === "pending" && (
+          <button className="secondary" disabled={disabled} onClick={() => setDialog("cancelRequest")} aria-describedby={titleId}>
             Cancel request
           </button>
         )}
-        {loan.role === "borrower" && loan.status === "approved" && !loan.returnReported && (
-          <button disabled={disabled} onClick={() => run("report", () => report({ id: loan._id }))}>
-            I&apos;ve returned it
+        {(owner || borrower) && loan.status === "approved" && !started && (
+          <button className="secondary" disabled={disabled} onClick={() => setDialog("cancelBooking")} aria-describedby={titleId}>
+            Cancel booking
           </button>
         )}
       </div>
-    </article>
+      {dialog === "approve" && <ApproveDialog loan={loan} onClose={() => setDialog(null)} />}
+      {dialog === "decline" && (
+        <ConfirmDialog
+          title={`Decline ${other}'s request?`}
+          description={`${loan.toolName}, ${formatRange(loan.start, loan.end)}. ${other} will be told.`}
+          confirmLabel="Decline request"
+          done="Request declined."
+          onConfirm={() => decide({ id: loan._id, approve: false, today })}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === "cancelRequest" && (
+        <ConfirmDialog
+          title="Cancel your request?"
+          description={`${loan.toolName}, ${formatRange(loan.start, loan.end)}. The owner will be told.`}
+          confirmLabel="Cancel request"
+          done="Request cancelled."
+          onConfirm={() => cancel({ id: loan._id })}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === "cancelBooking" && (
+        <ConfirmDialog
+          title="Cancel this booking?"
+          description={`${loan.toolName}, ${formatRange(loan.start, loan.end)}. ${other} will be told.`}
+          confirmLabel="Cancel booking"
+          done="Booking cancelled."
+          onConfirm={() => cancelBooking({ id: loan._id, today })}
+          onClose={() => setDialog(null)}
+        />
+      )}
+    </li>
+  );
+}
+
+// A titled list of loans with its own loading and empty states.
+export function LoanSection({
+  title,
+  loans,
+  empty,
+  readOnly,
+  footer,
+}: {
+  title: string;
+  loans: LoanView[] | undefined;
+  empty: string;
+  readOnly?: boolean;
+  footer?: React.ReactNode;
+}) {
+  const headingId = useId();
+  return (
+    <section aria-labelledby={headingId} className="section">
+      <h2 id={headingId}>
+        {title}
+        {loans && loans.length > 0 && <span className="section-count">{loans.length}</span>}
+      </h2>
+      {loans && loans.length === 0 ? (
+        <p className="empty">{empty}</p>
+      ) : (
+        <ul className="loans" aria-busy={loans === undefined}>
+          {loans === undefined ? (
+            <Skeletons count={2} kind="loan" />
+          ) : (
+            loans.map((l) => <LoanCard key={l._id} loan={l} readOnly={readOnly} />)
+          )}
+        </ul>
+      )}
+      {footer}
+    </section>
   );
 }
 

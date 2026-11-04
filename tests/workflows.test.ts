@@ -79,7 +79,6 @@ test("reminders: each one reports sent or failed, and failures fail the run", ()
     loanId,
     day: "2026-11-08",
     idempotencyKey: `reminder:${loanId}:2026-11-08`,
-    kind: "overdue",
     recipient: { name: "Ben", email },
     tool: { name: "Tent" },
     dueDate: "2026-11-06",
@@ -93,11 +92,19 @@ test("reminders: each one reports sent or failed, and failures fail the run", ()
     { loanId: "a", day: "2026-11-08", status: "sent" },
     { loanId: "b", day: "2026-11-08", status: "failed", error: "No email address on file" },
   ]);
-  const fail = code("overdue-reminders.json", "Fail run if any reminder failed");
-  const node = (json: unknown) => ({ $: () => ({ first: () => ({ json }) }) });
-  expect(() => run(fail, {}, node(out))).toThrow(/1 reminder\(s\) failed/);
-  expect(run(fail, {}, node({ sent: 3, failed: 0 })).result[0].json).toEqual({ sent: 3, failed: 0 });
+  const finish = code("overdue-reminders.json", "Finish");
+  expect(() => run(finish, { more: false, failedToday: 2 })).toThrow(/2 reminder\(s\) failed today/);
+  expect(() => run(finish, { more: true, failedToday: 0 })).toThrow(/Stopped after 50 batches/);
+  expect(run(finish, { more: false, failedToday: 0 }).result[0].json).toEqual({ failedToday: 0 });
   expect(() => run(send, { error: "nope" })).toThrow(/Unexpected claim response/);
+});
+
+test("the reminder workflow runs daily and loops while Convex has more", () => {
+  const w = load("overdue-reminders.json");
+  expect(w.nodes[0].parameters.rule.interval[0].expression).toBe("0 9 * * *");
+  const loop = w.nodes.find((n: { name: string }) => n.name === "More overdue loans?");
+  expect(loop.parameters.conditions.boolean[0].value1).toContain("$json.more === true && $runIndex < 49");
+  expect(w.connections["More overdue loans?"].main.map((o: { node: string }[]) => o[0].node)).toEqual(["Claim request", "Finish"]);
 });
 
 test("the error workflow builds a bounded failure report", () => {

@@ -48,11 +48,7 @@ const http = httpRouter();
 http.route({
   path: "/automation/reminders/claim",
   method: "POST",
-  handler: signedRoute((ctx, input) =>
-    ctx.runMutation(internal.automation.claimReminders, {
-      limit: typeof input.limit === "number" ? input.limit : 100,
-    }),
-  ),
+  handler: signedRoute((ctx) => ctx.runMutation(internal.automation.claimReminders, {})),
 });
 
 http.route({
